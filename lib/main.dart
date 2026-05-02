@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 
 void main() {
@@ -54,8 +55,42 @@ class GalleryApp extends StatelessWidget {
     return MaterialApp(
       title: 'Image Gallery',
       theme: ThemeData.dark(),
-      home: const GalleryPage(),
+      home: const AppShell(),
       debugShowCheckedModeBanner: false,
+    );
+  }
+}
+
+class AppShell extends StatelessWidget {
+  const AppShell({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return PlatformMenuBar(
+      menus: [
+        PlatformMenu(label: 'File', menus: [
+          PlatformMenuItem(
+            label: 'Open...',
+            shortcut: const SingleActivator(LogicalKeyboardKey.keyO, meta: true),
+            onSelected: () {},
+          ),
+          PlatformMenuItem(label: 'Close', onSelected: () {}),
+          const PlatformMenuItemGroup(members: [
+            PlatformMenuItem(label: 'Quit', onSelected: null),
+          ]),
+        ]),
+        PlatformMenu(label: 'Edit', menus: [
+          PlatformMenuItem(label: 'Select All', onSelected: () {}),
+        ]),
+        PlatformMenu(label: 'View', menus: [
+          PlatformMenuItem(label: 'Zoom In', onSelected: () {}),
+          PlatformMenuItem(label: 'Zoom Out', onSelected: () {}),
+        ]),
+        PlatformMenu(label: 'Help', menus: [
+          PlatformMenuItem(label: 'About', onSelected: () {}),
+        ]),
+      ],
+      child: const GalleryPage(),
     );
   }
 }
@@ -73,6 +108,9 @@ class _GalleryPageState extends State<GalleryPage> {
   double _committedWidth = 0;
   double _pendingWidth = 0;
   Timer? _resizeTimer;
+  String? _selectedPath;
+  double _previewWidth = 300;
+  bool _previewVisible = true;
 
   void _onLayoutWidth(double width) {
     if (width == _committedWidth) return;
@@ -96,7 +134,44 @@ class _GalleryPageState extends State<GalleryPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Gallery'),
+        title: MenuBar(
+          style: const MenuStyle(
+            backgroundColor: WidgetStatePropertyAll(Colors.transparent),
+            elevation: WidgetStatePropertyAll(0),
+            padding: WidgetStatePropertyAll(EdgeInsets.zero),
+          ),
+          children: [
+            SubmenuButton(
+              menuChildren: [
+                MenuItemButton(child: const Text('Open...'), onPressed: () {}),
+                MenuItemButton(child: const Text('Close'), onPressed: () {}),
+                const Divider(),
+                MenuItemButton(child: const Text('Quit'), onPressed: () {}),
+              ],
+              child: const Text('File'),
+            ),
+            SubmenuButton(
+              menuChildren: [
+                MenuItemButton(child: const Text('Select All'), onPressed: () {}),
+              ],
+              child: const Text('Edit'),
+            ),
+            SubmenuButton(
+              menuChildren: [
+                MenuItemButton(child: const Text('Zoom In'), onPressed: () {}),
+                MenuItemButton(child: const Text('Zoom Out'), onPressed: () {}),
+              ],
+              child: const Text('View'),
+            ),
+            SubmenuButton(
+              menuChildren: [
+                MenuItemButton(child: const Text('About'), onPressed: () {}),
+              ],
+              child: const Text('Help'),
+            ),
+          ],
+        ),
+        titleSpacing: 0,
         actions: [
           SegmentedButton<LayoutMode>(
             segments: const [
@@ -119,45 +194,91 @@ class _GalleryPageState extends State<GalleryPage> {
               onChanged: (v) => setState(() => _tileSize = v),
             ),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 8),
+          IconButton(
+            icon: Icon(_previewVisible ? Icons.view_sidebar : Icons.view_sidebar_outlined),
+            tooltip: _previewVisible ? 'Hide preview' : 'Show preview',
+            onPressed: () => setState(() => _previewVisible = !_previewVisible),
+          ),
+          const SizedBox(width: 4),
         ],
       ),
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          _onLayoutWidth(constraints.maxWidth);
-          final width = _committedWidth > 0 ? _committedWidth : constraints.maxWidth;
-          final cols = _columnCount(width);
+      body: Row(
+        children: [
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                _onLayoutWidth(constraints.maxWidth);
+                final width = _committedWidth > 0 ? _committedWidth : constraints.maxWidth;
+                final cols = _columnCount(width);
 
-          if (_layout == LayoutMode.masonry) {
-            return MasonryGridView.builder(
-              gridDelegate: SliverSimpleGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: cols,
-              ),
-              mainAxisSpacing: 2,
-              crossAxisSpacing: 2,
-              itemCount: kImagePaths.length,
-              itemBuilder: (context, index) => GalleryTile(
-                path: kImagePaths[index],
-                tileSize: _tileSize,
-                layout: _layout,
-              ),
-            );
-          }
+                if (_layout == LayoutMode.masonry) {
+                  return MasonryGridView.builder(
+                    gridDelegate: SliverSimpleGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: cols,
+                    ),
+                    mainAxisSpacing: 2,
+                    crossAxisSpacing: 2,
+                    itemCount: kImagePaths.length,
+                    itemBuilder: (context, index) => GalleryTile(
+                      path: kImagePaths[index],
+                      tileSize: _tileSize,
+                      layout: _layout,
+                      selected: kImagePaths[index] == _selectedPath,
+                      onTap: () => setState(() => _selectedPath = kImagePaths[index]),
+                    ),
+                  );
+                }
 
-          return GridView.builder(
-            itemCount: kImagePaths.length,
-            gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: _tileSize,
-              mainAxisSpacing: 2,
-              crossAxisSpacing: 2,
+                return GridView.builder(
+                  itemCount: kImagePaths.length,
+                  gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+                    maxCrossAxisExtent: _tileSize,
+                    mainAxisSpacing: 2,
+                    crossAxisSpacing: 2,
+                  ),
+                  itemBuilder: (context, index) => GalleryTile(
+                    path: kImagePaths[index],
+                    tileSize: _tileSize,
+                    layout: _layout,
+                    selected: kImagePaths[index] == _selectedPath,
+                    onTap: () => setState(() => _selectedPath = kImagePaths[index]),
+                  ),
+                );
+              },
             ),
-            itemBuilder: (context, index) => GalleryTile(
-              path: kImagePaths[index],
-              tileSize: _tileSize,
-              layout: _layout,
+          ),
+          if (_previewVisible) ...[
+            // Drag handle
+            GestureDetector(
+              onHorizontalDragUpdate: (d) => setState(() {
+                _previewWidth = (_previewWidth - d.delta.dx).clamp(150, 800);
+              }),
+              child: MouseRegion(
+                cursor: SystemMouseCursors.resizeColumn,
+                child: Container(
+                  width: 6,
+                  color: Colors.white12,
+                ),
+              ),
             ),
-          );
-        },
+            // Preview pane
+            SizedBox(
+              width: _previewWidth,
+              child: ColoredBox(
+                color: Colors.black,
+                child: _selectedPath != null
+                    ? Image.asset(_selectedPath!, fit: BoxFit.contain)
+                    : const Center(
+                        child: Text(
+                          'No image selected',
+                          style: TextStyle(color: Colors.white24),
+                        ),
+                      ),
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -169,11 +290,15 @@ class GalleryTile extends StatelessWidget {
     required this.path,
     required this.tileSize,
     required this.layout,
+    required this.selected,
+    required this.onTap,
   });
 
   final String path;
   final double tileSize;
   final LayoutMode layout;
+  final bool selected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -190,20 +315,20 @@ class GalleryTile extends StatelessWidget {
     );
 
     return GestureDetector(
-      onTap: () => _openLightbox(context),
-      child: layout == LayoutMode.masonry
-          ? image
-          : ColoredBox(color: Colors.black, child: image),
-    );
-  }
-
-  void _openLightbox(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (_) => Dialog(
-        backgroundColor: Colors.black,
-        insetPadding: const EdgeInsets.all(24),
-        child: Image.asset(path, fit: BoxFit.contain),
+      onTap: onTap,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          layout == LayoutMode.masonry
+              ? image
+              : ColoredBox(color: Colors.black, child: image),
+          if (selected)
+            DecoratedBox(
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.blue, width: 2),
+              ),
+            ),
+        ],
       ),
     );
   }
