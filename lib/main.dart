@@ -8,7 +8,7 @@ import 'package:window_manager/window_manager.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await windowManager.ensureInitialized();
-  await windowManager.setMinimumSize(const Size(640, 480));
+  await windowManager.setMinimumSize(const Size(1024, 600));
   runApp(const GalleryApp());
 }
 
@@ -112,9 +112,17 @@ class _GalleryPageState extends State<GalleryPage> {
   double _committedWidth = 0;
   double _pendingWidth = 0;
   Timer? _resizeTimer;
-  String? _selectedPath;
+  final Set<String> _selectedPaths = {};
   double _previewWidth = 300;
   bool _previewVisible = true;
+
+  // Marquee selection state
+  Offset? _dragStart;
+  Offset? _dragCurrent;
+  final _gridKey = GlobalKey();
+  final Map<String, GlobalKey> _tileKeys = {
+    for (final p in kImagePaths) p: GlobalKey(),
+  };
 
   void _onLayoutWidth(double width) {
     if (width == _committedWidth) return;
@@ -133,6 +141,31 @@ class _GalleryPageState extends State<GalleryPage> {
 
   int _columnCount(double availableWidth) =>
       (availableWidth / _tileSize).floor().clamp(1, 999);
+
+  Rect? get _selectionRect {
+    if (_dragStart == null || _dragCurrent == null) return null;
+    return Rect.fromPoints(_dragStart!, _dragCurrent!);
+  }
+
+  void _updateMarqueeSelection() {
+    final rect = _selectionRect;
+    if (rect == null) return;
+    final gridBox = _gridKey.currentContext?.findRenderObject() as RenderBox?;
+    if (gridBox == null) return;
+
+    final selected = <String>{};
+    for (final path in kImagePaths) {
+      final tileBox = _tileKeys[path]?.currentContext?.findRenderObject() as RenderBox?;
+      if (tileBox == null) continue;
+      // Convert tile position to grid-local coordinates
+      final tileOffset = tileBox.localToGlobal(Offset.zero, ancestor: gridBox);
+      final tileRect = tileOffset & tileBox.size;
+      if (rect.overlaps(tileRect)) selected.add(path);
+    }
+    setState(() => _selectedPaths
+      ..clear()
+      ..addAll(selected));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -216,37 +249,76 @@ class _GalleryPageState extends State<GalleryPage> {
                 final width = _committedWidth > 0 ? _committedWidth : constraints.maxWidth;
                 final cols = _columnCount(width);
 
+                Widget grid;
                 if (_layout == LayoutMode.masonry) {
-                  return MasonryGridView.builder(
+                  grid = MasonryGridView.builder(
+                    key: _gridKey,
                     gridDelegate: SliverSimpleGridDelegateWithFixedCrossAxisCount(
                       crossAxisCount: cols,
                     ),
-                    mainAxisSpacing: 2,
-                    crossAxisSpacing: 2,
+                    mainAxisSpacing: 8,
+                    crossAxisSpacing: 8,
                     itemCount: kImagePaths.length,
                     itemBuilder: (context, index) => GalleryTile(
+                      key: _tileKeys[kImagePaths[index]],
                       path: kImagePaths[index],
                       tileSize: _tileSize,
                       layout: _layout,
-                      selected: kImagePaths[index] == _selectedPath,
-                      onTap: () => setState(() => _selectedPath = kImagePaths[index]),
+                      selected: _selectedPaths.contains(kImagePaths[index]),
+                      onTap: () => setState(() {
+                        _selectedPaths.clear();
+                        _selectedPaths.add(kImagePaths[index]);
+                      }),
+                    ),
+                  );
+                } else {
+                  grid = GridView.builder(
+                    key: _gridKey,
+                    itemCount: kImagePaths.length,
+                    gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+                      maxCrossAxisExtent: _tileSize,
+                      mainAxisSpacing: 8,
+                      crossAxisSpacing: 8,
+                    ),
+                    itemBuilder: (context, index) => GalleryTile(
+                      key: _tileKeys[kImagePaths[index]],
+                      path: kImagePaths[index],
+                      tileSize: _tileSize,
+                      layout: _layout,
+                      selected: _selectedPaths.contains(kImagePaths[index]),
+                      onTap: () => setState(() {
+                        _selectedPaths.clear();
+                        _selectedPaths.add(kImagePaths[index]);
+                      }),
                     ),
                   );
                 }
 
-                return GridView.builder(
-                  itemCount: kImagePaths.length,
-                  gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                    maxCrossAxisExtent: _tileSize,
-                    mainAxisSpacing: 2,
-                    crossAxisSpacing: 2,
-                  ),
-                  itemBuilder: (context, index) => GalleryTile(
-                    path: kImagePaths[index],
-                    tileSize: _tileSize,
-                    layout: _layout,
-                    selected: kImagePaths[index] == _selectedPath,
-                    onTap: () => setState(() => _selectedPath = kImagePaths[index]),
+                return GestureDetector(
+                  onPanStart: (d) => setState(() {
+                    _dragStart = d.localPosition;
+                    _dragCurrent = d.localPosition;
+                  }),
+                  onPanUpdate: (d) {
+                    setState(() => _dragCurrent = d.localPosition);
+                    _updateMarqueeSelection();
+                  },
+                  onPanEnd: (_) => setState(() {
+                    _dragStart = null;
+                    _dragCurrent = null;
+                  }),
+                  child: Stack(
+                    children: [
+                      grid,
+                      if (_selectionRect != null)
+                        Positioned.fill(
+                          child: IgnorePointer(
+                            child: CustomPaint(
+                              painter: _MarqueePainter(_selectionRect!),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 );
               },
@@ -271,8 +343,8 @@ class _GalleryPageState extends State<GalleryPage> {
               width: _previewWidth,
               child: ColoredBox(
                 color: Colors.black,
-                child: _selectedPath != null
-                    ? Image.asset(_selectedPath!, fit: BoxFit.contain)
+                child: _selectedPaths.isNotEmpty
+                    ? Image.asset(_selectedPaths.first, fit: BoxFit.contain)
                     : const Center(
                         child: Text(
                           'No image selected',
@@ -321,19 +393,46 @@ class GalleryTile extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Stack(
-        fit: StackFit.expand,
+        fit: layout == LayoutMode.masonry ? StackFit.loose : StackFit.expand,
         children: [
           layout == LayoutMode.masonry
               ? image
               : ColoredBox(color: Colors.black, child: image),
           if (selected)
-            DecoratedBox(
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.blue, width: 2),
+            Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.blue, width: 2),
+                ),
               ),
             ),
         ],
       ),
     );
   }
+}
+
+class _MarqueePainter extends CustomPainter {
+  _MarqueePainter(this.rect);
+  final Rect rect;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..color = Colors.blue.withOpacity(0.15)
+        ..style = PaintingStyle.fill,
+    );
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..color = Colors.blue.withOpacity(0.7)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_MarqueePainter old) => old.rect != rect;
 }
