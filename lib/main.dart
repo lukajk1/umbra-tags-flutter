@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:window_manager/window_manager.dart';
@@ -49,6 +50,12 @@ const List<String> kImagePaths = [
   'assets/f592e90c35a422a4416736a28a3d5cd3.jpg',
 ];
 
+abstract final class AppColors {
+  static const darker  = Color(0xFF171717);
+  static const lighter = Color(0xFF262622);
+  static const accent  = Color(0xFF982820);
+}
+
 enum LayoutMode { crop, letterbox, masonry }
 
 class GalleryApp extends StatelessWidget {
@@ -58,7 +65,22 @@ class GalleryApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Image Gallery',
-      theme: ThemeData.dark(),
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: AppColors.lighter,
+        sliderTheme: const SliderThemeData(
+          activeTrackColor: AppColors.accent,
+          thumbColor: AppColors.accent,
+          overlayColor: Color(0x29982820),
+        ),
+        segmentedButtonTheme: SegmentedButtonThemeData(
+          style: ButtonStyle(
+            backgroundColor: WidgetStateProperty.resolveWith((states) {
+              if (states.contains(WidgetState.selected)) return AppColors.accent;
+              return null;
+            }),
+          ),
+        ),
+      ),
       home: const AppShell(),
       debugShowCheckedModeBanner: false,
     );
@@ -120,6 +142,7 @@ class _GalleryPageState extends State<GalleryPage> {
   Offset? _dragStart;
   Offset? _dragCurrent;
   final _gridKey = GlobalKey();
+  final _scrollController = ScrollController();
   final Map<String, GlobalKey> _tileKeys = {
     for (final p in kImagePaths) p: GlobalKey(),
   };
@@ -136,6 +159,7 @@ class _GalleryPageState extends State<GalleryPage> {
   @override
   void dispose() {
     _resizeTimer?.cancel();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -253,6 +277,7 @@ class _GalleryPageState extends State<GalleryPage> {
                 if (_layout == LayoutMode.masonry) {
                   grid = MasonryGridView.builder(
                     key: _gridKey,
+                    controller: _scrollController,
                     gridDelegate: SliverSimpleGridDelegateWithFixedCrossAxisCount(
                       crossAxisCount: cols,
                     ),
@@ -274,6 +299,7 @@ class _GalleryPageState extends State<GalleryPage> {
                 } else {
                   grid = GridView.builder(
                     key: _gridKey,
+                    controller: _scrollController,
                     itemCount: kImagePaths.length,
                     gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
                       maxCrossAxisExtent: _tileSize,
@@ -294,31 +320,49 @@ class _GalleryPageState extends State<GalleryPage> {
                   );
                 }
 
-                return GestureDetector(
-                  onPanStart: (d) => setState(() {
-                    _dragStart = d.localPosition;
-                    _dragCurrent = d.localPosition;
-                  }),
-                  onPanUpdate: (d) {
-                    setState(() => _dragCurrent = d.localPosition);
-                    _updateMarqueeSelection();
+                return Listener(
+                  onPointerDown: (e) {
+                    // Only start marquee on left button drag, not scroll wheel
+                    if (e.buttons == 1) {
+                      setState(() {
+                        _dragStart = e.localPosition;
+                        _dragCurrent = e.localPosition;
+                      });
+                    }
                   },
-                  onPanEnd: (_) => setState(() {
+                  onPointerMove: (e) {
+                    if (_dragStart != null) {
+                      setState(() => _dragCurrent = e.localPosition);
+                      _updateMarqueeSelection();
+                    }
+                  },
+                  onPointerUp: (_) => setState(() {
                     _dragStart = null;
                     _dragCurrent = null;
                   }),
-                  child: Stack(
-                    children: [
-                      grid,
-                      if (_selectionRect != null)
-                        Positioned.fill(
-                          child: IgnorePointer(
-                            child: CustomPaint(
-                              painter: _MarqueePainter(_selectionRect!),
-                            ),
-                          ),
+                  child: ScrollConfiguration(
+                    behavior: _GalleryScrollBehavior(),
+                    child: Scrollbar(
+                      controller: _scrollController,
+                      thickness: 8,
+                      radius: const Radius.circular(4),
+                      child: Padding(
+                        padding: const EdgeInsets.only(right: 12),
+                        child: Stack(
+                          children: [
+                            grid,
+                            if (_selectionRect != null)
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  child: CustomPaint(
+                                    painter: _MarqueePainter(_selectionRect!),
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
-                    ],
+                      ),
+                    ),
                   ),
                 );
               },
@@ -341,16 +385,18 @@ class _GalleryPageState extends State<GalleryPage> {
             // Preview pane
             SizedBox(
               width: _previewWidth,
-              child: ColoredBox(
-                color: Colors.black,
-                child: _selectedPaths.isNotEmpty
-                    ? Image.asset(_selectedPaths.first, fit: BoxFit.contain)
-                    : const Center(
-                        child: Text(
-                          'No image selected',
-                          style: TextStyle(color: Colors.white24),
+              child: DecoratedBox(
+                decoration: const BoxDecoration(color: AppColors.darker),
+                child: SizedBox.expand(
+                  child: _selectedPaths.isNotEmpty
+                      ? Image.asset(_selectedPaths.first, fit: BoxFit.contain)
+                      : const Center(
+                          child: Text(
+                            'No image selected',
+                            style: TextStyle(color: Colors.white24),
+                          ),
                         ),
-                      ),
+                ),
               ),
             ),
           ],
@@ -392,22 +438,38 @@ class GalleryTile extends StatelessWidget {
 
     return GestureDetector(
       onTap: onTap,
+      onSecondaryTapUp: (d) => _showContextMenu(context, d.globalPosition),
       child: Stack(
         fit: layout == LayoutMode.masonry ? StackFit.loose : StackFit.expand,
         children: [
           layout == LayoutMode.masonry
               ? image
-              : ColoredBox(color: Colors.black, child: image),
+              : ColoredBox(color: AppColors.lighter, child: image),
           if (selected)
             Positioned.fill(
               child: DecoratedBox(
                 decoration: BoxDecoration(
-                  border: Border.all(color: Colors.blue, width: 2),
+                  border: Border.all(color: AppColors.accent, width: 2),
                 ),
               ),
             ),
         ],
       ),
+    );
+  }
+
+  void _showContextMenu(BuildContext context, Offset position) {
+    showMenu(
+      context: context,
+      position: RelativeRect.fromLTRB(position.dx, position.dy, position.dx, position.dy),
+      popUpAnimationStyle: AnimationStyle.noAnimation,
+      items: <PopupMenuEntry>[
+        const PopupMenuItem(value: 'open', child: Text('Open')),
+        const PopupMenuItem(value: 'copy', child: Text('Copy')),
+        const PopupMenuDivider(),
+        const PopupMenuItem(value: 'delete', child: Text('Delete')),
+        const PopupMenuItem(value: 'info', child: Text('Get Info')),
+      ],
     );
   }
 }
@@ -421,13 +483,13 @@ class _MarqueePainter extends CustomPainter {
     canvas.drawRect(
       rect,
       Paint()
-        ..color = Colors.blue.withOpacity(0.15)
+        ..color = AppColors.accent.withOpacity(0.15)
         ..style = PaintingStyle.fill,
     );
     canvas.drawRect(
       rect,
       Paint()
-        ..color = Colors.blue.withOpacity(0.7)
+        ..color = AppColors.accent.withOpacity(0.7)
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1,
     );
@@ -435,4 +497,17 @@ class _MarqueePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_MarqueePainter old) => old.rect != rect;
+}
+
+class _GalleryScrollBehavior extends ScrollBehavior {
+  @override
+  Set<PointerDeviceKind> get dragDevices => {
+    PointerDeviceKind.touch,
+    PointerDeviceKind.mouse,
+    PointerDeviceKind.trackpad,
+  };
+
+  @override
+  Widget buildScrollbar(BuildContext context, Widget child, ScrollableDetails details) =>
+      child; // suppress built-in scrollbar — we render our own
 }
