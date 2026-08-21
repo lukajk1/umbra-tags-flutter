@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
-import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:window_manager/window_manager.dart';
@@ -49,6 +51,30 @@ const List<String> kImagePaths = [
   'assets/f3dd5775d2893552774d99b8da6c0c0a.jpg',
   'assets/f592e90c35a422a4416736a28a3d5cd3.jpg',
 ];
+
+Future<File> _sessionFile() async {
+  final appData = Platform.environment['APPDATA'] ?? '.';
+  final dir = Directory('$appData/Umbra Tags');
+  if (!await dir.exists()) await dir.create(recursive: true);
+  return File('${dir.path}/session.json');
+}
+
+Future<Map<String, dynamic>> _loadSession() async {
+  try {
+    final file = await _sessionFile();
+    if (await file.exists()) {
+      return jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    }
+  } catch (_) {}
+  return {};
+}
+
+Future<void> _saveSession(Map<String, dynamic> data) async {
+  try {
+    final file = await _sessionFile();
+    await file.writeAsString(jsonEncode(data));
+  } catch (_) {}
+}
 
 abstract final class AppColors {
   static const darker  = Color(0xFF171717);
@@ -143,6 +169,22 @@ class _GalleryPageState extends State<GalleryPage> {
   Offset? _dragCurrent;
   final _gridKey = GlobalKey();
   final _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSession().then((data) {
+      if (data.isEmpty) return;
+      setState(() {
+        _tileSize = (data['tileSize'] as num?)?.toDouble() ?? _tileSize;
+        _previewWidth = (data['previewWidth'] as num?)?.toDouble() ?? _previewWidth;
+      });
+    });
+  }
+
+  void _persistSession() {
+    _saveSession({'tileSize': _tileSize, 'previewWidth': _previewWidth});
+  }
   final Map<String, GlobalKey> _tileKeys = {
     for (final p in kImagePaths) p: GlobalKey(),
   };
@@ -252,7 +294,7 @@ class _GalleryPageState extends State<GalleryPage> {
               min: 50,
               max: 400,
               label: '${_tileSize.round()}px',
-              onChanged: (v) => setState(() => _tileSize = v),
+              onChanged: (v) { setState(() => _tileSize = v); _persistSession(); },
             ),
           ),
           const SizedBox(width: 8),
@@ -373,6 +415,7 @@ class _GalleryPageState extends State<GalleryPage> {
             GestureDetector(
               onHorizontalDragUpdate: (d) => setState(() {
                 _previewWidth = (_previewWidth - d.delta.dx).clamp(150, 800);
+                _persistSession();
               }),
               child: MouseRegion(
                 cursor: SystemMouseCursors.resizeColumn,

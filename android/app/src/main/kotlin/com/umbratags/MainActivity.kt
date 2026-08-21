@@ -1,4 +1,4 @@
-package com.example.flutter_gallery_test
+package com.umbratags
 
 import io.flutter.embedding.android.FlutterActivity
 
