@@ -10,6 +10,18 @@ class EmbeddingRepository {
   Object? dispatch(Map args) {
     final key = args['key'] as String? ?? '';
     switch (args['op']) {
+      case 'vector':
+        final rows = db.select(
+          """SELECT e.vector FROM embeddings e JOIN assets a ON a.id=e.asset_id
+          WHERE e.asset_id=? AND e.model_key=? AND e.analyzed_sha256=a.sha256 AND e.vector IS NOT NULL""",
+          [args['assetId'], key],
+        );
+        if (rows.isEmpty) return null;
+        final data = ByteData.sublistView(rows.first['vector'] as Uint8List);
+        return List<double>.generate(
+          data.lengthInBytes ~/ 4,
+          (i) => data.getFloat32(i * 4, Endian.little),
+        );
       case 'register':
         db.execute(
           '''INSERT OR IGNORE INTO embedding_models

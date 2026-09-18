@@ -9,7 +9,7 @@ if (-not $OutputDirectory) {
 }
 $destination = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $destination) { throw "Output folder already exists: $destination. Choose a new folder." }
-foreach ($required in @((Join-Path $releaseRoot 'flutter_gallery_test.exe'), $venvPython, (Join-Path $mlRoot 'models/siglip2-base-224/bundle.json'))) {
+foreach ($required in @((Join-Path $releaseRoot 'flutter_gallery_test.exe'), $venvPython, (Join-Path $mlRoot 'models/siglip2-base-224/bundle.json'), (Join-Path $mlRoot 'models/siglip2-text-224/bundle.json'))) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Missing $required. Build the release app and prepare the bundled model first." }
 }
 $pythonBase = (& $venvPython -c 'import sys; print(sys.base_prefix)').Trim()
@@ -25,7 +25,7 @@ Copy-Tree $releaseRoot $destination
 $bundledMl = Join-Path $destination 'umbra-tags-ml'
 $bundledPython = Join-Path $bundledMl 'python'
 New-Item -ItemType Directory -Path $bundledPython -Force | Out-Null
-foreach ($name in @('runner.py','embedding_worker.py','embedding.json','models.json','requirements.txt','README.md','best_model.pth','model.pth')) {
+foreach ($name in @('runner.py','embedding_worker.py','embedding.json','tag_worker.py','tagging.json','tag_vocabulary.json','models.json','requirements.txt','README.md','best_model.pth','model.pth')) {
     Copy-Item -LiteralPath (Join-Path $mlRoot $name) -Destination $bundledMl
 }
 Copy-Tree (Join-Path $mlRoot 'ml_adapters') (Join-Path $bundledMl 'ml_adapters')

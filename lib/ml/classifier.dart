@@ -220,6 +220,11 @@ class PythonImageClassifier implements ImageClassifier {
     }
   }
 
+  Future<Map<String, dynamic>> requestTags(
+    String method, [
+    Map<String, Object?> args = const {},
+  ]) => _request('tags.$method', args);
+
   /// Shared JSON-lines transport for independent embedding adapters.
   Future<Map<String, dynamic>> requestEmbedding(
     String method, [

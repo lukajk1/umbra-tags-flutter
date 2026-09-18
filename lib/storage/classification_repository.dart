@@ -7,6 +7,57 @@ class ClassificationRepository {
   ClassificationRepository(this.db);
   final Database db;
 
+  /// Commit manual batch edits and explicitly accepted per-image suggestions
+  /// together. Suggestions never apply themselves or affect other images.
+  void applyReviewedTags(Map args) {
+    final assets = (args['assets'] as List).cast<Map>();
+    final accepted = args['accepted'] as Map;
+    final add = (args['add'] as List).cast<String>().toSet();
+    final remove = (args['remove'] as List).cast<String>().toSet();
+    final ids = assets.map((a) => a['id'] as String).toSet();
+    if (accepted.keys.any((id) => !ids.contains(id))) {
+      throw StateError('Suggestion image is not in this selection.');
+    }
+    db.execute('BEGIN IMMEDIATE');
+    try {
+      for (final tag in {...add, ...remove}) {
+        if (db.select('SELECT id FROM tags WHERE id=?', [tag]).isEmpty) {
+          throw StateError('A selected tag no longer exists.');
+        }
+      }
+      for (final asset in assets) {
+        final rows = db.select('SELECT sha256 FROM assets WHERE id=?', [
+          asset['id'],
+        ]);
+        if (rows.isEmpty || rows.first['sha256'] != asset['hash']) {
+          throw StateError(
+            'An image changed or was deleted; review tags again.',
+          );
+        }
+        _assign([
+          asset['id'] as String,
+        ], ((accepted[asset['id']] as List?) ?? []).cast<String>());
+        for (final tag in add) {
+          db.execute(
+            'INSERT OR IGNORE INTO asset_tags(asset_id,tag_id) VALUES (?,?)',
+            [asset['id'], tag],
+          );
+        }
+        // An explicit removal in the manual tab wins over an accepted suggestion.
+        for (final tag in remove) {
+          db.execute('DELETE FROM asset_tags WHERE asset_id=? AND tag_id=?', [
+            asset['id'],
+            tag,
+          ]);
+        }
+      }
+      db.execute('COMMIT');
+    } catch (_) {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
+  }
+
   List<String> tagAssets(List<String> assetIds, List<String> names) {
     db.execute('BEGIN IMMEDIATE');
     try {

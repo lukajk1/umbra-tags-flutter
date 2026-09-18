@@ -30,6 +30,17 @@ class SimilarityController extends ChangeNotifier {
       : '${enabled ? 'Similarity' : 'Similarity paused'} · $ready / $total indexed${failed > 0 ? ' · $failed failed' : ''}';
 
   Future<void> start() => _starting ??= _initialize();
+
+  /// Preloading does not enable a paused indexing queue or modify images.
+  Future<void> warmUp() async {
+    await start();
+    if (_closed) throw StateError('Library closed.');
+    if (error != null) throw StateError(error!);
+    if (!_loaded) await embedder.load();
+    if (_closed) return;
+    _loaded = true;
+  }
+
   Future<void> _initialize() async {
     try {
       enabled = await library.similarity({'op': 'settings'}) as bool;

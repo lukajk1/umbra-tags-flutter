@@ -123,3 +123,26 @@ runtime and the ML virtualenv's dependencies into a new `dist/` folder. Keep tha
 folder together. Users need neither Python nor a model download. This Windows
 packaging script does not produce a macOS installer; macOS signing/entitlements
 remain separate packaging work.
+
+
+## Suggested subject tags
+
+Select images, choose **Edit tags**, then open **Suggestions**. Use **Suggest tags**
+for the displayed image or **Suggest for all** for the selection. Review each image
+with the arrows and check the labels you want. Nothing is assigned until **Apply tags**; Cancel discards all checks. Accepted labels apply only to their image and
+create/reuse named tags. Manual batch additions/removals and accepted suggestions
+are committed in one catalog transaction; explicit manual removals take priority.
+The wizard also works when the library has no tags yet.
+
+`TagSuggester` is a backend-neutral interface, separate from classification,
+embedding and persistence. The default local SigLIP implementation ranks the
+library's existing names plus `umbra-tags-ml/tag_vocabulary.json`. It returns up to
+12 possible tags per image, with ranking scores (not calibrated probabilities).
+Matching cached image vectors are reused; a different embedding model can coexist
+with the tagger's own bundled image encoder. Suggestions are temporary review data;
+only accepted assignments are saved. Batch generation can stop after the current
+image, and individual failures do not discard other results.
+
+The tagger adds the matching bundled SigLIP text encoder/tokenizer (~1.05 GiB).
+No runtime downloads occur. Rebuild the offline package to include the updated ML
+scripts, text model, tokenizer and SentencePiece dependency.

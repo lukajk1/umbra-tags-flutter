@@ -17,6 +17,7 @@ import 'widgets/tag_widgets.dart';
 import 'receiver_server.dart';
 import 'ml/classifier.dart';
 import 'ml/image_embedder.dart';
+import 'ml/tag_suggester.dart';
 import 'ml/similarity_controller.dart';
 import 'widgets/similarity_widgets.dart';
 import 'widgets/ml_settings_dialog.dart';
@@ -221,7 +222,97 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   ReceiverServer? _receiver;
   String _receiverStatus = 'Web receiver starting';
   MlSettings _mlSettings = const MlSettings();
+  bool _preloadMlOnLaunch = false;
+  bool _warmingModels = false;
+  ImageEmbedder? _standbyEmbedder;
+  final Map<String, String> _modelStartupStatus = {
+    'Artwork / photo classifier': 'On demand',
+    'Similarity image encoder': 'On demand / indexing',
+    'Tag suggestion text encoder': 'On demand',
+  };
+
+  Future<void> _warmModels() async {
+    if (_warmingModels || !mounted || _closingWindow) return;
+    setState(() => _warmingModels = true);
+    final loaders = <String, Future<void> Function()>{
+      'Artwork / photo classifier': () =>
+          _imageClassifier.loadModel(_mlSettings.modelId),
+      'Similarity image encoder': () async {
+        final controller = _similarity;
+        if (controller != null) {
+          await controller.warmUp();
+        } else {
+          final embedder = _standbyEmbedder ??= PythonImageEmbedder(
+            home: _mlSettings.home,
+            python: _mlSettings.python,
+          );
+          await embedder.load();
+        }
+      },
+      'Tag suggestion text encoder': () => _suggestionBackend.load(),
+    };
+    try {
+      for (final entry in loaders.entries) {
+        if (!mounted || _closingWindow) return;
+        setState(() => _modelStartupStatus[entry.key] = 'Loading…');
+        try {
+          await entry.value();
+          if (mounted && !_closingWindow) {
+            setState(() => _modelStartupStatus[entry.key] = 'Loaded');
+          }
+        } catch (error) {
+          if (mounted && !_closingWindow) {
+            setState(() => _modelStartupStatus[entry.key] = 'Failed: $error');
+          }
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _warmingModels = false);
+    }
+  }
+
   ImageClassifier? _classifier;
+  TagSuggester? _tagSuggester;
+  TagSuggester get _suggestionBackend => _tagSuggester ??= PythonTagSuggester(
+    home: _mlSettings.home,
+    python: _mlSettings.python,
+  );
+
+  Future<List<TagSuggestion>> _suggestTags(LibraryAsset asset) async {
+    final library = _library!;
+    final backend = _suggestionBackend;
+    final similarity = _similarity;
+    final candidates = _tags.map((tag) => tag.name).toList();
+    final model = await backend.info();
+    if (!identical(library, _library)) throw StateError('Library changed.');
+    List<double>? vector;
+    String? key;
+    if (similarity != null) {
+      await similarity.start();
+      if (model.compatibleEmbeddingKey != null &&
+          similarity.model?.key == model.compatibleEmbeddingKey &&
+          similarity.error == null) {
+        await similarity.ensure(asset);
+        key = model.compatibleEmbeddingKey;
+        vector =
+            (await library.similarity({
+                      'op': 'vector',
+                      'key': key,
+                      'assetId': asset.id,
+                    })
+                    as List?)
+                ?.cast<double>();
+      }
+    }
+    return backend.suggest(
+      asset: asset,
+      imagePath: library.absolutePath(asset.relativePath),
+      candidates: candidates,
+      embeddingKey: key,
+      vector: vector,
+    );
+  }
+
   SimilarityController? _similarity;
 
   Future<void> _stopSimilarity() async {
@@ -235,9 +326,13 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
 
   void _startSimilarity() {
     if (_library == null) return;
+    final embedder =
+        _standbyEmbedder ??
+        PythonImageEmbedder(home: _mlSettings.home, python: _mlSettings.python);
+    _standbyEmbedder = null;
     final controller = SimilarityController(
       _library!,
-      PythonImageEmbedder(home: _mlSettings.home, python: _mlSettings.python),
+      embedder,
       shouldYield: () => _busy || _closingWindow,
     );
     _similarity = controller;
@@ -271,6 +366,11 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       builder: (_) => MlSettingsDialog(settings: _mlSettings),
     );
     if (settings == null) return;
+    await _standbyEmbedder?.dispose();
+    _standbyEmbedder = null;
+    _modelStartupStatus.updateAll((key, value) => 'On demand');
+    await _tagSuggester?.dispose();
+    _tagSuggester = null;
     await _classifier?.dispose();
     _classifier = null;
     _mlSettings = settings;
@@ -523,6 +623,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
           }
         }
       }
+      _preloadMlOnLaunch = data['preloadMlOnLaunch'] == true;
       _sessionRestored = true;
       final ml = data['ml'];
       if (ml is Map) {
@@ -558,6 +659,9 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       });
     }
     await _startWebReceiver();
+    if (_preloadMlOnLaunch && mounted && !_closingWindow) {
+      unawaited(_warmModels());
+    }
   }
 
   void _persistSession() {
@@ -569,6 +673,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   void _writeSession() {
     if (!_sessionRestored) return;
     final data = <String, dynamic>{
+      'preloadMlOnLaunch': _preloadMlOnLaunch,
       'tileSize': _tileSize,
       'previewWidth': _previewWidth,
       'layout': _layout.name,
@@ -850,20 +955,6 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   void _editSelectionTags() => _run(() async {
     final selected = _selection;
     if (selected.isEmpty) return;
-    if (_tags.isEmpty) {
-      await showDialog<bool>(
-        context: context,
-        barrierDismissible: false,
-        builder: (_) => TagDetailsDialog(
-          tags: _tags,
-          onSave: (name, parent) async {
-            await _library!.saveTag(name: name, parentId: parent);
-          },
-        ),
-      );
-      await _reload();
-      if (_tags.isEmpty || !mounted) return;
-    }
     if (!mounted) return;
     await showDialog<bool>(
       context: context,
@@ -871,6 +962,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       builder: (_) => BatchTagsDialog(
         tags: _tags,
         assets: selected,
+        onSuggest: _suggestTags,
+        thumbnail: (asset) => _library!.thumbnail(asset),
+        onApplyReviewed: (add, remove, accepted) =>
+            _library!.applyReviewedTags(selected, add, remove, accepted),
         onSave: (add, remove) => _library!.editTags(
           selected.map((a) => a.id).toList(),
           add: add,
@@ -1013,6 +1108,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     _writeSession();
     await _sessionWrite;
     await _receiver?.close();
+    await _standbyEmbedder?.dispose();
+    _standbyEmbedder = null;
+    await _tagSuggester?.dispose();
+    _tagSuggester = null;
     await _classifier?.dispose();
     await _stopSimilarity();
     await _library?.close();
@@ -1035,7 +1134,9 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     _sessionTimer?.cancel();
     _writeSession();
     windowManager.removeListener(this);
+    unawaited(_standbyEmbedder?.dispose() ?? Future<void>.value());
     unawaited(_receiver?.close() ?? Future<void>.value());
+    unawaited(_tagSuggester?.dispose() ?? Future<void>.value());
     unawaited(_classifier?.dispose() ?? Future<void>.value());
     final library = _library;
     unawaited(_stopSimilarity().then((_) => library?.close()));
@@ -1140,8 +1241,53 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                   child: const Text('ML classify'),
                 ),
                 MenuItemButton(
-                  onPressed: _busy ? null : _configureMl,
+                  onPressed: _busy || _warmingModels ? null : _configureMl,
                   child: const Text('ML settings…'),
+                ),
+                SubmenuButton(
+                  menuChildren: [
+                    CheckboxMenuButton(
+                      value: _preloadMlOnLaunch,
+                      onChanged: !_sessionRestored
+                          ? null
+                          : (value) {
+                              setState(
+                                () => _preloadMlOnLaunch = value ?? false,
+                              );
+                              _persistSession();
+                            },
+                      child: const Text('Load ML models on launch'),
+                    ),
+                    MenuItemButton(
+                      onPressed: _warmingModels || _busy
+                          ? null
+                          : () => unawaited(_warmModels()),
+                      child: Text(
+                        _warmingModels ? 'Loading models…' : 'Load models now',
+                      ),
+                    ),
+                    const Divider(),
+                    for (final entry in _modelStartupStatus.entries)
+                      MenuItemButton(
+                        child: Tooltip(
+                          message: '${entry.key}: ${entry.value}',
+                          child: SizedBox(
+                            width: 330,
+                            child: Text(
+                              '${entry.key}: ${entry.value}',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ),
+                      ),
+                    const MenuItemButton(
+                      child: Text(
+                        'Indexing keeps its separate pause/resume setting.',
+                      ),
+                    ),
+                  ],
+                  child: const Text('Startup'),
                 ),
                 MenuItemButton(
                   onPressed: _busy || _selectedPaths.isEmpty

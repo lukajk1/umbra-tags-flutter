@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../storage/library_store.dart';
 import '../storage/tag_repository.dart';
+import '../ml/tag_suggester.dart';
+import 'tag_suggestions_panel.dart';
 
 enum LibraryView { all, untagged, archived }
 
@@ -71,7 +73,13 @@ class _TagSidebarState extends State<TagSidebar> {
               ListTile(
                 dense: true,
                 leading: Icon(icon, size: 19),
-                title: Text(title),
+                title: Text(
+                  title,
+                  style: const TextStyle(
+                    fontFamily: 'LibreBaskerville',
+                    fontWeight: FontWeight.w400,
+                  ),
+                ),
                 selected: widget.view == view && widget.selectedTag == null,
                 onTap: widget.busy ? null : () => widget.onView(view),
               ),
@@ -313,16 +321,28 @@ class BatchTagsDialog extends StatefulWidget {
     required this.tags,
     required this.assets,
     required this.onSave,
+    this.onSuggest,
+    this.thumbnail,
+    this.onApplyReviewed,
   });
   final List<LibraryTag> tags;
   final List<LibraryAsset> assets;
   final Future<void> Function(List<String> add, List<String> remove) onSave;
+  final Future<List<TagSuggestion>> Function(LibraryAsset)? onSuggest;
+  final Future<String?> Function(LibraryAsset)? thumbnail;
+  final Future<void> Function(
+    List<String> add,
+    List<String> remove,
+    Map<String, List<String>> accepted,
+  )?
+  onApplyReviewed;
   @override
   State<BatchTagsDialog> createState() => _BatchTagsDialogState();
 }
 
 class _BatchTagsDialogState extends State<BatchTagsDialog> {
   final Map<String, bool> _changes = {};
+  final Map<String, Set<String>> _accepted = {};
   String _search = '';
   String? _error;
   bool _saving = false;
@@ -342,10 +362,22 @@ class _BatchTagsDialogState extends State<BatchTagsDialog> {
       _error = null;
     });
     try {
-      await widget.onSave(
-        _changes.entries.where((e) => e.value).map((e) => e.key).toList(),
-        _changes.entries.where((e) => !e.value).map((e) => e.key).toList(),
-      );
+      final add = _changes.entries
+          .where((e) => e.value)
+          .map((e) => e.key)
+          .toList();
+      final remove = _changes.entries
+          .where((e) => !e.value)
+          .map((e) => e.key)
+          .toList();
+      if (widget.onApplyReviewed != null) {
+        await widget.onApplyReviewed!(add, remove, {
+          for (final entry in _accepted.entries)
+            if (entry.value.isNotEmpty) entry.key: entry.value.toList(),
+        });
+      } else {
+        await widget.onSave(add, remove);
+      }
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
       if (mounted) {
@@ -362,50 +394,98 @@ class _BatchTagsDialogState extends State<BatchTagsDialog> {
     final rows = tagTree(widget.tags)
         .where((r) => r.tag.name.toLowerCase().contains(_search.toLowerCase()))
         .toList();
+    final canSuggest =
+        widget.onSuggest != null &&
+        widget.thumbnail != null &&
+        widget.onApplyReviewed != null;
+    final manual = Column(
+      children: [
+        const Text(
+          'A dash means only some images have this tag. Unchanged tags are preserved.',
+          style: TextStyle(color: Colors.white60),
+        ),
+        TextField(
+          onChanged: (value) => setState(() => _search = value),
+          decoration: const InputDecoration(
+            hintText: 'Find a tag',
+            prefixIcon: Icon(Icons.search),
+          ),
+        ),
+        Expanded(
+          child: rows.isEmpty
+              ? const Center(child: Text('No matching tags'))
+              : ListView.builder(
+                  itemCount: rows.length,
+                  itemBuilder: (context, index) {
+                    final row = rows[index];
+                    return CheckboxListTile(
+                      key: ValueKey('assign-tag-${row.tag.id}'),
+                      title: Text('${'  ' * row.depth}${row.tag.name}'),
+                      dense: true,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      tristate: true,
+                      value: _value(row.tag.id),
+                      onChanged: _saving
+                          ? null
+                          : (_) => setState(
+                              () => _changes[row.tag.id] =
+                                  _value(row.tag.id) != true,
+                            ),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
     return PopScope(
       canPop: !_saving,
       child: AlertDialog(
         title: Text('Tags · ${widget.assets.length} selected'),
         content: SizedBox(
-          width: 400,
-          height: 380,
+          width: 560,
+          height: 540,
           child: Column(
             children: [
-              const Text(
-                'A dash means only some images have this tag. Unchanged tags are preserved.',
-                style: TextStyle(color: Colors.white60),
-              ),
-              TextField(
-                onChanged: (value) => setState(() => _search = value),
-                decoration: const InputDecoration(
-                  hintText: 'Find a tag',
-                  prefixIcon: Icon(Icons.search),
-                ),
-              ),
               Expanded(
-                child: rows.isEmpty
-                    ? const Center(child: Text('No matching tags'))
-                    : ListView.builder(
-                        itemCount: rows.length,
-                        itemBuilder: (context, index) {
-                          final row = rows[index];
-                          return CheckboxListTile(
-                            key: ValueKey('assign-tag-${row.tag.id}'),
-                            title: Text('${'  ' * row.depth}${row.tag.name}'),
-                            dense: true,
-                            controlAffinity: ListTileControlAffinity.leading,
-                            tristate: true,
-                            value: _value(row.tag.id),
-                            onChanged: _saving
-                                ? null
-                                : (_) => setState(
-                                    () => _changes[row.tag.id] =
-                                        _value(row.tag.id) != true,
+                child: canSuggest
+                    ? DefaultTabController(
+                        length: 2,
+                        initialIndex: widget.tags.isEmpty ? 1 : 0,
+                        child: Column(
+                          children: [
+                            const TabBar(
+                              tabs: [
+                                Tab(text: 'Existing tags'),
+                                Tab(text: 'Suggestions'),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            Expanded(
+                              child: TabBarView(
+                                children: [
+                                  manual,
+                                  TagSuggestionsPanel(
+                                    assets: widget.assets,
+                                    tags: widget.tags,
+                                    onSuggest: widget.onSuggest!,
+                                    thumbnail: widget.thumbnail!,
+                                    accepted: _accepted,
+                                    saving: _saving,
+                                    onChanged: () => setState(() {}),
                                   ),
-                          );
-                        },
-                      ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    : manual,
               ),
+              if (_accepted.values.any((names) => names.isNotEmpty))
+                Text(
+                  '${_accepted.values.fold<int>(0, (sum, names) => sum + names.length)} suggestions selected',
+                  style: const TextStyle(fontSize: 12, color: Colors.white60),
+                ),
               if (_error != null)
                 Text(
                   _error!,
@@ -420,7 +500,12 @@ class _BatchTagsDialogState extends State<BatchTagsDialog> {
             child: const Text('Cancel'),
           ),
           FilledButton(
-            onPressed: _saving || _changes.isEmpty ? null : _save,
+            onPressed:
+                _saving ||
+                    (_changes.isEmpty &&
+                        _accepted.values.every((names) => names.isEmpty))
+                ? null
+                : _save,
             child: Text(_saving ? 'Saving…' : 'Apply tags'),
           ),
         ],

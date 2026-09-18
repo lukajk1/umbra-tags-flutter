@@ -255,6 +255,20 @@ class LibraryStore {
   Future<Object?> similarity(Map<String, Object?> args) =>
       _call('similarity', args);
 
+  Future<void> applyReviewedTags(
+    List<LibraryAsset> assets,
+    List<String> add,
+    List<String> remove,
+    Map<String, List<String>> accepted,
+  ) async {
+    await _call('reviewedTags', {
+      'assets': assets.map((a) => {'id': a.id, 'hash': a.contentHash}).toList(),
+      'add': add,
+      'remove': remove,
+      'accepted': accepted,
+    });
+  }
+
   Future<void> close() => _closing ??= _close();
 
   Future<void> _close() async {
@@ -460,6 +474,9 @@ class _LibraryEngine {
           (values['assetIds'] as List).cast<String>(),
           (values['names'] as List).cast<String>(),
         );
+      case 'reviewedTags':
+        ClassificationRepository(db).applyReviewedTags(args as Map);
+        return null;
       case 'classification':
         return ClassificationRepository(db).apply(args as Map);
       case 'predictions':
