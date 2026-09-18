@@ -6,7 +6,7 @@ This is a new format; legacy Calypso saves are deliberately not supported.
 
 ```
 library.json             # format identity (UTF-8 JSON)
-catalog.sqlite           # authoritative metadata, SQLite user_version = 1
+catalog.sqlite           # authoritative metadata, SQLite user_version = 2
 media/<id-prefix>/<id>.<ext>
 cache/thumbnails/<id>-<sha256>-v2.jpg
 cache/previews/          # reserved, rebuildable
@@ -35,7 +35,8 @@ Creating an independent fork would require a future explicit operation.
 converter. UUIDs are text. All timestamps are UTC milliseconds since the Unix epoch.
 Booleans are constrained SQLite integers, 0 or 1. Enable `PRAGMA foreign_keys=ON`
 on every connection. Format and database versions are checked independently; unknown
-versions are rejected without migration. The manifest ID must match the sole library row.
+versions are rejected. Catalog v1 is upgraded transactionally to v2 after a
+metadata backup is saved as `backups/catalog-before-v2-<timestamp>.sqlite`. The manifest ID must match the sole library row.
 
 * `assets`: one record per original, with portable path, original filename, MIME type,
   dimensions after EXIF orientation, byte size, import/source dates, exact SHA-256,
@@ -121,3 +122,26 @@ File: New Library (choose an empty folder), Open Library, Import Images, Back Up
 Metadata, Close Library. Edit: Select All, Archive/Restore Selected. View: Archive,
 Refresh Files, zoom. Existing crop/fit/masonry layouts and preview remain. No demo
 images are loaded. The Tags sidebar supports create, rename, reparent and delete; batch editing is available below the preview and in the Edit menu. Parent filters include descendants. All Images and Untagged exclude archived images. Tag deletion promotes children and removes only the deleted tag assignments. ML classify is available from the image context menu and Edit menu. The model backend is replaceable; predictions and optional named-tag assignments use the existing schema.
+
+
+## Similarity embeddings (catalog v2)
+
+The manifest format remains version 1. `embedding_models` identifies each model
+by a SHA-256 key derived from its pinned revision, exported weights/config/processor
+hashes, preprocessing version and adapter identity. It also records the upstream
+model ID, revision, preprocessing recipe and vector dimension in the library.
+`embeddings` stores one row per asset/model key, the analyzed image SHA-256,
+normalized float32 little-endian vector BLOB (dimension * 4 bytes), timestamp, or
+an error instead of a vector. Asset deletion cascades to its embeddings.
+
+A missing row means pending; an error row means failed and requires explicit retry.
+Content-hash mismatches are pending again. Completed writes are atomic; unfinished
+inference simply repeats after reopening. Only matching model keys/dimensions and
+current image hashes are searched. `similarity_settings` persists background
+indexing enabled/paused per library. Indexing and search cover non-archived,
+non-missing images regardless of the gallery's current tag filter. A selected
+query image can be embedded on demand even while background indexing is paused.
+
+Similarity uses exact cosine ranking in the catalog worker and returns the top 50,
+excluding the query image. Scores are similarities, not confidence probabilities.
+Model weights are bundled once with the app, not copied into each library.

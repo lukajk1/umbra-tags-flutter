@@ -1,9 +1,10 @@
 // Public, language-independent library format. See LIBRARY_FORMAT.md.
 const libraryFormat = 'umbra-tags-library';
 const libraryFormatVersion = 1;
-const librarySchemaVersion = 1;
+const librarySchemaVersion = 2;
 
-const createSchema = '''
+const createSchema =
+    '''
 CREATE TABLE library (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -68,5 +69,35 @@ CREATE TABLE jobs (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
-PRAGMA user_version = 1;
+$embeddingSchema
+PRAGMA user_version = 2;
 ''';
+
+// Additive v1 -> v2 migration; originals and existing metadata are unchanged.
+const embeddingSchema = """
+CREATE TABLE embedding_models (
+  model_key TEXT PRIMARY KEY,
+  model_id TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  preprocessing TEXT NOT NULL,
+  dimension INTEGER NOT NULL CHECK(dimension > 0)
+);
+CREATE TABLE embeddings (
+  asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+  model_key TEXT NOT NULL REFERENCES embedding_models(model_key),
+  analyzed_sha256 TEXT NOT NULL,
+  dimension INTEGER,
+  vector BLOB,
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(asset_id,model_key),
+  CHECK((vector IS NOT NULL AND dimension > 0 AND length(vector)=dimension*4 AND error IS NULL)
+    OR (vector IS NULL AND error IS NOT NULL))
+);
+CREATE INDEX embeddings_model ON embeddings(model_key);
+CREATE TABLE similarity_settings (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  enabled INTEGER NOT NULL CHECK(enabled IN (0,1))
+);
+INSERT INTO similarity_settings VALUES (1,1);
+""";

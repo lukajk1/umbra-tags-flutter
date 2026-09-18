@@ -16,6 +16,9 @@ import 'storage/tag_repository.dart';
 import 'widgets/tag_widgets.dart';
 import 'receiver_server.dart';
 import 'ml/classifier.dart';
+import 'ml/image_embedder.dart';
+import 'ml/similarity_controller.dart';
+import 'widgets/similarity_widgets.dart';
 import 'widgets/ml_settings_dialog.dart';
 import 'widgets/preview_details.dart';
 import 'widgets/gallery_drop_target.dart';
@@ -219,6 +222,41 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   String _receiverStatus = 'Web receiver starting';
   MlSettings _mlSettings = const MlSettings();
   ImageClassifier? _classifier;
+  SimilarityController? _similarity;
+
+  Future<void> _stopSimilarity() async {
+    final controller = _similarity;
+    _similarity = null;
+    if (controller != null) {
+      await controller.stop();
+      controller.dispose();
+    }
+  }
+
+  void _startSimilarity() {
+    if (_library == null) return;
+    final controller = SimilarityController(
+      _library!,
+      PythonImageEmbedder(home: _mlSettings.home, python: _mlSettings.python),
+      shouldYield: () => _busy || _closingWindow,
+    );
+    _similarity = controller;
+    unawaited(controller.start());
+  }
+
+  void _findSimilar(LibraryAsset asset) {
+    final controller = _similarity;
+    if (_busy || controller == null) return;
+    showDialog<void>(
+      context: context,
+      builder: (_) => SimilarityDialog(
+        controller: controller,
+        source: asset,
+        onOpen: _openAssetExternally,
+      ),
+    );
+  }
+
   bool _classifying = false;
   bool _cancelClassification = false;
 
@@ -236,6 +274,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     await _classifier?.dispose();
     _classifier = null;
     _mlSettings = settings;
+    await _stopSimilarity();
+    _startSimilarity();
     _persistSession();
   });
 
@@ -583,8 +623,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       return;
     }
     _rememberScrollPosition();
+    await _stopSimilarity();
     await _library?.close();
     _library = library;
+    _startSimilarity();
     _lastLibraryPath = library.root;
     _knownLibraries[library.id] = {'name': library.name, 'path': library.root};
     _showArchived = false;
@@ -686,6 +728,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
 
   void _closeLibrary() => _run(() async {
     _rememberScrollPosition();
+    await _stopSimilarity();
     await _library?.close();
     if (!mounted) return;
     setState(() {
@@ -920,10 +963,13 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     if (_selectedPaths.isNotEmpty) _openImageExternally(_selectedPaths.first);
   }
 
-  void _openImageExternally(String path) => _run(() async {
-    if (_library == null) return;
+  void _openImageExternally(String path) {
     final asset = _assetsByPath[path];
-    if (asset == null) return;
+    if (asset != null) _openAssetExternally(asset);
+  }
+
+  void _openAssetExternally(LibraryAsset asset) => _run(() async {
+    if (_library == null) return;
     final file = File(_library!.absolutePath(asset.relativePath));
     if (!await file.exists()) {
       throw LibraryException('This image file is missing from the library.');
@@ -968,6 +1014,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     await _sessionWrite;
     await _receiver?.close();
     await _classifier?.dispose();
+    await _stopSimilarity();
     await _library?.close();
     await windowManager.destroy();
   }
@@ -990,7 +1037,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     windowManager.removeListener(this);
     unawaited(_receiver?.close() ?? Future<void>.value());
     unawaited(_classifier?.dispose() ?? Future<void>.value());
-    unawaited(_library?.close() ?? Future<void>.value());
+    final library = _library;
+    unawaited(_stopSimilarity().then((_) => library?.close()));
     _scrollController.dispose();
     _galleryFocus.dispose();
     super.dispose();
@@ -1244,6 +1292,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                 ],
               ),
             ),
+            if (_similarity != null) SimilarityStatus(controller: _similarity!),
             if (_selectedPaths.isNotEmpty)
               Text('${_selectedPaths.length} selected  '),
             if (_classifying)
@@ -1396,6 +1445,9 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                   _selectContextImage(_imagePaths[index]),
                               onDelete: _busy ? null : _deleteSelection,
                               onClassify: _busy ? null : _classifySelection,
+                              onSimilar: _busy
+                                  ? null
+                                  : () => _findSimilar(_assets[index]),
                             ),
                           );
                         } else {
@@ -1431,6 +1483,9 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                   _selectContextImage(_imagePaths[index]),
                               onDelete: _busy ? null : _deleteSelection,
                               onClassify: _busy ? null : _classifySelection,
+                              onSimilar: _busy
+                                  ? null
+                                  : () => _findSimilar(_assets[index]),
                             ),
                           );
                         }
@@ -1606,6 +1661,7 @@ class GalleryTile extends StatelessWidget {
     this.onContextSelect,
     this.onDelete,
     this.onClassify,
+    this.onSimilar,
   });
 
   final String path;
@@ -1616,7 +1672,11 @@ class GalleryTile extends StatelessWidget {
   final LayoutMode layout;
   final bool selected;
   final VoidCallback onTap;
-  final VoidCallback? onDoubleTap, onContextSelect, onDelete, onClassify;
+  final VoidCallback? onDoubleTap,
+      onContextSelect,
+      onDelete,
+      onClassify,
+      onSimilar;
 
   @override
   Widget build(BuildContext context) {
@@ -1698,6 +1758,11 @@ class GalleryTile extends StatelessWidget {
         const PopupMenuItem(value: 'copy', child: Text('Copy file path')),
         const PopupMenuItem(value: 'info', child: Text('Image info')),
         PopupMenuItem(
+          value: 'similar',
+          enabled: onSimilar != null,
+          child: const Text('Find similar'),
+        ),
+        PopupMenuItem(
           value: 'classify',
           enabled: onClassify != null,
           child: const Text('ML classify'),
@@ -1712,6 +1777,7 @@ class GalleryTile extends StatelessWidget {
     if (choice == 'copy') await Clipboard.setData(ClipboardData(text: path));
     if (choice == 'delete' && context.mounted) onDelete?.call();
     if (choice == 'classify' && context.mounted) onClassify?.call();
+    if (choice == 'similar' && context.mounted) onSimilar?.call();
     if (choice == 'info' && context.mounted) {
       await showDialog<void>(
         context: context,

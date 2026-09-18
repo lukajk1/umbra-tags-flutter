@@ -96,3 +96,30 @@ have the tag. Changes apply to the whole selection; untouched assignments remain
 Click a sidebar tag to filter by that tag and all descendants. All Images and
 Untagged exclude archived images; Archived shows only archived images. The tag search
 field narrows the sidebar, not filenames. Existing libraries need no migration.
+
+
+## Find similar images
+
+Right-click an image → **Find similar**. Missing embeddings for the query image
+are prioritized. Results update while other images are indexed, and show indexed
+coverage instead of claiming to search the full library before it is ready.
+Double-click a result to open it in the system viewer. The bottom status bar opens
+index details, pause/resume, error details and retry. Imports from disk, drag/drop
+and the extension join the open library's background queue automatically.
+
+The default bundled model is Google's SigLIP 2 Base (224px vision encoder).
+Inference is local, CPU-based, limited to two Torch threads. First launch loads
+local weights; there is no runtime network download. Python lives outside Flutter,
+cosine search lives in the storage isolate, and the embedder interface is swappable.
+Indexing pauses between images while interactive library operations run. Archived
+or missing images are excluded. The first animation frame is embedded.
+
+### Offline Windows distribution
+
+Build with `flutter build windows --release`, then run
+`powershell -File tool/package_windows.ps1` (optional `-OutputDirectory <new-folder>`).
+The script copies the release app, sibling ML scripts and weights, Python's standard
+runtime and the ML virtualenv's dependencies into a new `dist/` folder. Keep that
+folder together. Users need neither Python nor a model download. This Windows
+packaging script does not produce a macOS installer; macOS signing/entitlements
+remain separate packaging work.

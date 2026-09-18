@@ -50,3 +50,6 @@ app.*.map.json
 
 # Claude Code
 .claude/
+
+# Offline distributable app bundles
+/dist/

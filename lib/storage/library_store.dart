@@ -13,6 +13,7 @@ import 'package:uuid/uuid.dart';
 import 'schema.dart';
 import 'tag_repository.dart';
 import 'classification_repository.dart';
+import 'embedding_repository.dart';
 
 class LibraryException implements Exception {
   LibraryException(this.message);
@@ -251,6 +252,9 @@ class LibraryStore {
           .map((row) => Map<String, Object?>.from(row as Map))
           .toList();
 
+  Future<Object?> similarity(Map<String, Object?> args) =>
+      _call('similarity', args);
+
   Future<void> close() => _closing ??= _close();
 
   Future<void> _close() async {
@@ -387,7 +391,7 @@ class _LibraryEngine {
         }
         _db = sqlite3.open(path('catalog.sqlite'), mode: OpenMode.readWrite);
         final version = _db!.select('PRAGMA user_version').first.values.first;
-        if (version != librarySchemaVersion) {
+        if (version != 1 && version != librarySchemaVersion) {
           throw LibraryException(
             'Unsupported catalog schema $version. No migration was performed.',
           );
@@ -398,6 +402,21 @@ class _LibraryEngine {
         }
         name = rows.first['name'] as String;
         _ensureDirectories();
+      }
+      if (db.select('PRAGMA user_version').first.values.first == 1) {
+        final backup = path(
+          'backups/catalog-before-v2-${DateTime.now().toUtc().microsecondsSinceEpoch}.sqlite',
+        );
+        db.execute('VACUUM INTO ?', [backup]);
+        db.execute('BEGIN IMMEDIATE');
+        try {
+          db.execute(embeddingSchema);
+          db.execute('PRAGMA user_version = 2');
+          db.execute('COMMIT');
+        } catch (_) {
+          db.execute('ROLLBACK');
+          rethrow;
+        }
       }
       db.execute('PRAGMA foreign_keys = ON');
       db.execute('PRAGMA journal_mode = DELETE');
@@ -431,6 +450,8 @@ class _LibraryEngine {
 
   Object? dispatch(String method, Object? args) {
     switch (method) {
+      case 'similarity':
+        return EmbeddingRepository(db).dispatch(args as Map);
       case 'assets':
         return TagRepository(db).assets(args as Map);
       case 'tagByName':

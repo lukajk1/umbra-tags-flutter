@@ -91,15 +91,22 @@ class PythonImageClassifier implements ImageClassifier {
         'ML folder not found. Choose umbra-tags-ml in Edit → ML settings.',
       );
     }
+    final bundledPython = p.join(
+      root,
+      'python',
+      Platform.isWindows ? 'python.exe' : 'bin/python',
+    );
     final executable =
         python ??
         Platform.environment['UMBRA_ML_PYTHON'] ??
-        p.join(
-          root,
-          '.venv',
-          Platform.isWindows ? 'Scripts' : 'bin',
-          Platform.isWindows ? 'python.exe' : 'python',
-        );
+        (File(bundledPython).existsSync()
+            ? bundledPython
+            : p.join(
+                root,
+                '.venv',
+                Platform.isWindows ? 'Scripts' : 'bin',
+                Platform.isWindows ? 'python.exe' : 'python',
+              ));
     if (!File(executable).existsSync()) {
       throw StateError(
         'ML Python environment not found: $executable. See umbra-tags-ml/README.md for setup.',
@@ -110,7 +117,11 @@ class PythonImageClassifier implements ImageClassifier {
       executable,
       ['-u', p.join(root, 'runner.py')],
       workingDirectory: root,
-      environment: {'PYTHONUTF8': '1'},
+      environment: {
+        'PYTHONUTF8': '1',
+        'HF_HUB_OFFLINE': '1',
+        'TRANSFORMERS_OFFLINE': '1',
+      },
     );
     if (_disposed) {
       process.kill();
@@ -208,6 +219,12 @@ class PythonImageClassifier implements ImageClassifier {
       _pending.remove(id);
     }
   }
+
+  /// Shared JSON-lines transport for independent embedding adapters.
+  Future<Map<String, dynamic>> requestEmbedding(
+    String method, [
+    Map<String, Object?> args = const {},
+  ]) => _request('embedding.$method', args);
 
   @override
   Future<List<ClassifierModel>> models() async {
