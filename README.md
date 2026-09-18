@@ -18,6 +18,16 @@ See [LIBRARY_FORMAT.md](LIBRARY_FORMAT.md) for the versioned schema and recovery
 
 ## Development
 
+Flutter remembers the last library, Crop/Fit/Masonry layout, thumbnail size, preview
+panel width and visibility, and scroll positions for each library/view. Preferences
+are saved automatically after a short pause and when closing, in Flutter's own
+`flutter-session.json` under the OS application-support directory. They are separate
+from the legacy WinForms settings and the portable library catalog. Windows currently
+resolves this to `%APPDATA%/Umbra Tags/Umbra Tags/Umbra Tags/flutter-session.json`.
+Settings writes use a flushed temporary file followed by replacement; invalid optional
+values fall back to defaults. macOS still requires selecting the library folder each
+session to grant sandbox access.
+
 ```sh
 flutter pub get
 flutter run -d windows
@@ -39,7 +49,11 @@ database. Only one cooperating application may edit a library at once.
 This is the new library/storage foundation, not a complete port of WinForms. The
 app supports nested tags, batch assignment, and tag-based filtering. Tag groups and
 classifier integration are future work; their storage tables already exist. Legacy save conversion is intentionally deferred.
-The standalone `lib/receiver_server.dart` experiment is not wired into library imports.
+The desktop app starts `lib/receiver_server.dart` automatically on IPv4 loopback port 8934.
+The Chrome extension in `../web-beam` selects a library, tags and an optional longest-edge
+size limit. Open each destination library in the app at least once, then refresh the
+extension popup and save its destination. A browser icon in the status bar reports
+receiver availability; hover for details. See `../web-beam/README.md` for setup and the protocol.
 The current import flow supports JPEG, PNG, GIF, WebP and BMP, not videos.
 
 Tests cover moving libraries, duplicate imports, archival, missing media restoration,
@@ -48,6 +62,12 @@ create/import/preview/close/reopen UI flow. A widget-test screenshot is written 
 `build/portable-library-ui.png` (Flutter's test font is intentionally non-production).
 
 ## Tagging
+
+Select a gallery image and press **Delete**, or right-click it and choose **Delete**,
+to permanently remove its library copy, thumbnail and metadata. Multiple selected
+images require confirmation; a single image is deleted immediately. Right-clicking
+an unselected image selects just that image. External source files and tag definitions
+are kept. Delete only acts while the gallery has keyboard focus, not while editing text.
 
 Use **+** in the Tags sidebar to create a tag. Its menu offers Add Child Tag,
 Rename / Move, and Delete. Deletion removes that tag's assignments and moves its

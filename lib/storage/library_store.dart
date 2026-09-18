@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:image/image.dart' as img;
@@ -147,6 +148,26 @@ class LibraryStore {
     );
   }
 
+  Future<ImportResult> importCapture(
+    Uint8List bytes, {
+    required String filename,
+    List<String> tagIds = const [],
+    int maxDimension = 0,
+  }) async {
+    final result =
+        await _call('capture', {
+              'bytes': bytes,
+              'filename': filename,
+              'tags': tagIds,
+              'maxDimension': maxDimension,
+            })
+            as Map;
+    return ImportResult(
+      LibraryAsset.fromMap(Map<String, Object?>.from(result['asset'] as Map)),
+      result['duplicate'] as bool,
+    );
+  }
+
   Future<String?> thumbnail(LibraryAsset asset) async =>
       await _call('thumbnail', asset.id) as String?;
   Future<void> refresh() async {
@@ -155,6 +176,10 @@ class LibraryStore {
 
   Future<void> archive(List<String> ids, bool archived) async {
     await _call('archive', {'ids': ids, 'archived': archived});
+  }
+
+  Future<void> deleteAssets(List<String> ids) async {
+    await _call('delete', ids);
   }
 
   Future<String> backup() async => await _call('backup') as String;
@@ -385,6 +410,8 @@ class _LibraryEngine {
         return null;
       case 'import':
         return _import(args as String);
+      case 'capture':
+        return _capture(args as Map);
       case 'thumbnail':
         return _thumbnail(args as String);
       case 'refresh':
@@ -406,6 +433,9 @@ class _LibraryEngine {
           rethrow;
         }
         return null;
+      case 'delete':
+        _deleteAssets((args as List).cast<String>());
+        return null;
       case 'backup':
         final relative = 'backups/catalog-$now-${const Uuid().v4()}.sqlite';
         db.execute('VACUUM INTO ?', [path(relative)]);
@@ -418,7 +448,76 @@ class _LibraryEngine {
     }
   }
 
-  Map<String, Object?> _import(String source) {
+  Map<String, Object?> _capture(Map values) {
+    var bytes = values['bytes'] as Uint8List;
+    final limit = values['maxDimension'] as int;
+    if (limit < 0 || limit > 16384) {
+      throw LibraryException('Maximum edge must be 0–16384 pixels.');
+    }
+    if (bytes.length > 25 * 1024 * 1024) {
+      throw LibraryException('Image exceeds 25 MB.');
+    }
+    final decoder = img.findDecoderForData(bytes);
+    final info = decoder?.startDecode(bytes);
+    if (info == null ||
+        info.width < 1 ||
+        info.height < 1 ||
+        info.width * info.height * info.numFrames > 80000000) {
+      throw LibraryException(
+        'Invalid image or image exceeds the 80 megapixel decoded limit (including animation frames).',
+      );
+    }
+    var ext = img.findFormatForData(bytes).name;
+    if (!LibraryStore.supportedExtensions.contains(ext)) {
+      throw LibraryException('Unsupported image format: $ext');
+    }
+    if (limit > 0 && (info.width > limit || info.height > limit)) {
+      final decoded = img.decodeImage(bytes);
+      if (decoded == null) throw LibraryException('Could not decode image.');
+      final oriented = img.bakeOrientation(decoded);
+      final resized = img.copyResize(
+        oriented,
+        width: oriented.width >= oriented.height ? limit : null,
+        height: oriented.height > oriented.width ? limit : null,
+        interpolation: img.Interpolation.average,
+      );
+      if (ext == 'jpg') {
+        bytes = img.encodeJpg(resized, quality: 92);
+      } else if (ext == 'gif') {
+        bytes = img.encodeGif(resized);
+      } else {
+        ext = 'png';
+        bytes = img.encodePng(resized);
+      }
+    }
+    final supplied = p.posix.basename(
+      (values['filename'] as String).replaceAll('\\', '/'),
+    );
+    final stem = p
+        .basenameWithoutExtension(supplied)
+        .replaceAll(RegExp(r'[\x00-\x1f]'), '')
+        .trim();
+    final filename =
+        '${stem.isEmpty ? 'web-image' : stem.substring(0, stem.length.clamp(0, 180))}.$ext';
+    return _import(
+      filename,
+      content: bytes,
+      tagIds: (values['tags'] as List).cast<String>(),
+    );
+  }
+
+  Map<String, Object?> _import(
+    String source, {
+    Uint8List? content,
+    List<String> tagIds = const [],
+  }) {
+    for (final tag in tagIds) {
+      if (db.select('SELECT id FROM tags WHERE id = ?', [tag]).isEmpty) {
+        throw LibraryException(
+          'A selected tag no longer exists. Refresh the extension.',
+        );
+      }
+    }
     final file = File(source);
     final extension = p.extension(source).toLowerCase().replaceFirst('.', '');
     if (!LibraryStore.supportedExtensions.contains(extension)) {
@@ -429,7 +528,11 @@ class _LibraryEngine {
     final journal = File(path('staging/$assetId.json'));
     var journalWritten = false;
     try {
-      file.copySync(stage.path);
+      if (content == null) {
+        file.copySync(stage.path);
+      } else {
+        stage.writeAsBytesSync(content, flush: true);
+      }
       final bytes = stage.readAsBytesSync();
       final hash = sha256.convert(bytes).toString();
       final existing = db.select('SELECT * FROM assets WHERE sha256 = ?', [
@@ -443,6 +546,7 @@ class _LibraryEngine {
           stage.renameSync(destination.path);
         }
         db.execute('UPDATE assets SET missing = 0 WHERE id = ?', [row['id']]);
+        TagRepository(db).editAssignments([row['id'] as String], tagIds, []);
         return {
           'duplicate': true,
           'asset': Map<String, Object?>.from(
@@ -469,11 +573,11 @@ class _LibraryEngine {
         'height': oriented.height,
         'byte_size': bytes.length,
         'imported_at': now,
-        'source_modified_at': file
-            .lastModifiedSync()
-            .toUtc()
-            .millisecondsSinceEpoch,
+        'source_modified_at': content != null
+            ? now
+            : file.lastModifiedSync().toUtc().millisecondsSinceEpoch,
         'sha256': hash,
+        'tag_ids': tagIds,
       };
       // A flushed journal precedes the media rename; recovery can finish the SQL insert.
       final journalTemp = File('${journal.path}.tmp');
@@ -499,23 +603,36 @@ class _LibraryEngine {
   }
 
   void _insertAsset(Map<String, Object?> record) {
-    db.execute(
-      '''INSERT INTO assets
+    db.execute('BEGIN IMMEDIATE');
+    try {
+      db.execute(
+        '''INSERT INTO assets
       (id,relative_path,original_filename,media_type,width,height,byte_size,
        imported_at,source_modified_at,sha256) VALUES (?,?,?,?,?,?,?,?,?,?)''',
-      [
-        'id',
-        'relative_path',
-        'original_filename',
-        'media_type',
-        'width',
-        'height',
-        'byte_size',
-        'imported_at',
-        'source_modified_at',
-        'sha256',
-      ].map((k) => record[k]).toList(),
-    );
+        [
+          'id',
+          'relative_path',
+          'original_filename',
+          'media_type',
+          'width',
+          'height',
+          'byte_size',
+          'imported_at',
+          'source_modified_at',
+          'sha256',
+        ].map((k) => record[k]).toList(),
+      );
+      for (final tag in (record['tag_ids'] as List? ?? const [])) {
+        db.execute(
+          'INSERT OR IGNORE INTO asset_tags (asset_id, tag_id) VALUES (?, ?)',
+          [record['id'], tag],
+        );
+      }
+      db.execute('COMMIT');
+    } catch (_) {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
   }
 
   String? _thumbnail(String assetId) {
@@ -547,11 +664,109 @@ class _LibraryEngine {
     return target.path;
   }
 
+  void _deleteAssets(List<String> ids) {
+    final records = <Map<String, Object?>>[];
+    for (final id in ids.toSet()) {
+      final rows = db.select(
+        'SELECT id, relative_path, sha256 FROM assets WHERE id = ?',
+        [id],
+      );
+      if (rows.isNotEmpty) records.add(Map<String, Object?>.from(rows.single));
+    }
+    if (records.isEmpty) return;
+    final journal = File(path('staging/delete-${const Uuid().v4()}.json'));
+    final temp = File('${journal.path}.tmp');
+    temp.writeAsStringSync(
+      jsonEncode({'operation': 'delete', 'assets': records}),
+      flush: true,
+    );
+    temp.renameSync(journal.path);
+    _finishDelete(journal);
+  }
+
+  void _finishDelete(File journal) {
+    final data = jsonDecode(journal.readAsStringSync()) as Map;
+    if (data['operation'] != 'delete') {
+      throw LibraryException('Invalid deletion journal.');
+    }
+    final records = (data['assets'] as List).cast<Map>();
+    // Validate the entire batch before touching any files, including on recovery.
+    for (final row in records) {
+      final id = row['id'] as String;
+      final relative = row['relative_path'] as String;
+      final hash = row['sha256'] as String;
+      if (!RegExp(r'^[0-9a-f-]{36}$').hasMatch(id) ||
+          !RegExp(r'^[0-9a-f]{64}$').hasMatch(hash) ||
+          relative !=
+              'media/${id.substring(0, 2)}/$id${p.extension(relative)}' ||
+          !LibraryStore.supportedExtensions.contains(
+            p.extension(relative).substring(1),
+          )) {
+        throw LibraryException(
+          'Invalid deletion journal. Files were preserved.',
+        );
+      }
+      path(relative);
+      final existing = db.select(
+        'SELECT relative_path, sha256 FROM assets WHERE id = ?',
+        [id],
+      );
+      if (existing.isNotEmpty &&
+          (existing.single['relative_path'] != relative ||
+              existing.single['sha256'] != hash)) {
+        throw LibraryException(
+          'Deletion journal conflicts with an existing image.',
+        );
+      }
+    }
+    for (final row in records) {
+      for (final relative in [
+        row['relative_path'] as String,
+        'cache/thumbnails/${row['id']}-${row['sha256']}-v2.jpg',
+      ]) {
+        final file = File(path(relative));
+        if (file.existsSync()) {
+          for (var attempt = 0; ; attempt++) {
+            try {
+              file.deleteSync();
+              break;
+            } on FileSystemException catch (error) {
+              if (!Platform.isWindows ||
+                  error.osError?.errorCode != 32 ||
+                  attempt >= 9) {
+                rethrow;
+              }
+              // Native image codecs release file mappings asynchronously.
+              // This runs in the storage isolate, never the UI thread.
+              sleep(const Duration(milliseconds: 50));
+            }
+          }
+        }
+      }
+    }
+    db.execute('BEGIN IMMEDIATE');
+    try {
+      for (final row in records) {
+        db.execute('DELETE FROM assets WHERE id = ?', [row['id']]);
+      }
+      db.execute('COMMIT');
+    } catch (_) {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
+    journal.deleteSync();
+  }
+
   void _recover() {
+    final deletions = <File>[];
     for (final entry in Directory(
       path('staging'),
     ).listSync(followLinks: false)) {
       if (entry is! File || !entry.path.endsWith('.json')) continue;
+      if (p.basename(entry.path).startsWith('delete-')) {
+        deletions.add(entry);
+        continue;
+      }
       final record = Map<String, Object?>.from(
         jsonDecode(entry.readAsStringSync()) as Map,
       );
@@ -597,6 +812,9 @@ class _LibraryEngine {
       }
       _insertAsset(record);
       entry.deleteSync();
+    }
+    for (final journal in deletions) {
+      _finishDelete(journal);
     }
     db.execute(
       "UPDATE jobs SET status = 'interrupted', updated_at = ? WHERE status = 'running'",

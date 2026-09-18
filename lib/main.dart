@@ -13,6 +13,7 @@ import 'package:path/path.dart' as p;
 import 'storage/library_store.dart';
 import 'storage/tag_repository.dart';
 import 'widgets/tag_widgets.dart';
+import 'receiver_server.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -20,7 +21,7 @@ void main() async {
   await windowManager.setTitle('Umbra Tags');
   await windowManager.setMinimumSize(const Size(1024, 600));
   await windowManager.setPreventClose(true);
-  runApp(const GalleryApp());
+  runApp(const GalleryApp(startReceiver: true));
 }
 
 Future<File> _sessionFile() async {
@@ -30,9 +31,9 @@ Future<File> _sessionFile() async {
   return File(p.join(dir.path, 'flutter-session.json'));
 }
 
-Future<Map<String, dynamic>> _loadSession() async {
+Future<Map<String, dynamic>> _loadSession([File? sessionFile]) async {
   try {
-    final file = await _sessionFile();
+    final file = sessionFile ?? await _sessionFile();
     if (await file.exists()) {
       return jsonDecode(await file.readAsString()) as Map<String, dynamic>;
     }
@@ -40,10 +41,16 @@ Future<Map<String, dynamic>> _loadSession() async {
   return {};
 }
 
-Future<void> _saveSession(Map<String, dynamic> data) async {
+Future<void> _saveSession(
+  Map<String, dynamic> data, [
+  File? sessionFile,
+]) async {
   try {
-    final file = await _sessionFile();
-    await file.writeAsString(jsonEncode(data));
+    final file = sessionFile ?? await _sessionFile();
+    await file.parent.create(recursive: true);
+    final temporary = File('${file.path}.tmp');
+    await temporary.writeAsString(jsonEncode(data), flush: true);
+    await temporary.rename(file.path);
   } catch (_) {}
 }
 
@@ -55,8 +62,15 @@ abstract final class AppColors {
 
 enum LayoutMode { crop, letterbox, masonry }
 
+double _settingNumber(Object? value, double fallback, double min, double max) =>
+    value is num && value.isFinite
+    ? value.toDouble().clamp(min, max)
+    : fallback;
+
 class GalleryApp extends StatelessWidget {
-  const GalleryApp({super.key});
+  const GalleryApp({super.key, this.startReceiver = false, this.sessionFile});
+  final bool startReceiver;
+  final File? sessionFile;
 
   @override
   Widget build(BuildContext context) {
@@ -87,20 +101,25 @@ class GalleryApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const AppShell(),
+      home: AppShell(startReceiver: startReceiver, sessionFile: sessionFile),
       debugShowCheckedModeBanner: false,
     );
   }
 }
 
 class AppShell extends StatelessWidget {
-  const AppShell({super.key});
+  const AppShell({super.key, this.startReceiver = false, this.sessionFile});
+  final bool startReceiver;
+  final File? sessionFile;
   @override
-  Widget build(BuildContext context) => const GalleryPage();
+  Widget build(BuildContext context) =>
+      GalleryPage(startReceiver: startReceiver, sessionFile: sessionFile);
 }
 
 class GalleryPage extends StatefulWidget {
-  const GalleryPage({super.key});
+  const GalleryPage({super.key, this.startReceiver = false, this.sessionFile});
+  final bool startReceiver;
+  final File? sessionFile;
 
   @override
   State<GalleryPage> createState() => _GalleryPageState();
@@ -121,6 +140,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   Offset? _dragCurrent;
   final _gridKey = GlobalKey();
   final _scrollController = ScrollController();
+  final _galleryFocus = FocusNode(debugLabel: 'Gallery');
 
   LibraryStore? _library;
   List<LibraryAsset> _assets = [];
@@ -143,27 +163,200 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   String? _lastLibraryPath;
   Timer? _sessionTimer;
   Future<void> _sessionWrite = Future.value();
+  bool _sessionRestored = false;
+  final Map<String, double> _scrollPositions = {};
+  double? _pendingScrollOffset;
+  String? get _scrollKey => _library == null
+      ? null
+      : '${_library!.id}/${_showArchived
+            ? 'archive'
+            : _untagged
+            ? 'untagged'
+            : _tagFilter != null
+            ? 'tag/$_tagFilter'
+            : 'all'}';
+
+  void _rememberScrollPosition() {
+    if (_pendingScrollOffset != null ||
+        !_scrollController.hasClients ||
+        _scrollKey == null) {
+      return;
+    }
+    _scrollPositions[_scrollKey!] = _scrollController.offset;
+    _persistSession();
+  }
+
+  void _queueScrollRestore() {
+    _pendingScrollOffset = _scrollPositions[_scrollKey] ?? 0;
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _restoreScrollPosition(),
+    );
+  }
+
+  void _restoreScrollPosition() {
+    if (!mounted ||
+        _pendingScrollOffset == null ||
+        !_scrollController.hasClients ||
+        !_scrollController.position.hasContentDimensions) {
+      return;
+    }
+    _scrollController.jumpTo(
+      _pendingScrollOffset!.clamp(
+        0,
+        _scrollController.position.maxScrollExtent,
+      ),
+    );
+    _pendingScrollOffset = null;
+  }
+
+  final Map<String, Map<String, String>> _knownLibraries = {};
+  ReceiverServer? _receiver;
+  String _receiverStatus = 'Web receiver starting';
+
+  Future<T> _withWebLibrary<T>(
+    String id,
+    Future<T> Function(LibraryStore) operation,
+  ) async {
+    if (_busy || _closingWindow || !mounted) {
+      throw ReceiverException(409, 'Umbra Tags is busy. Try again shortly.');
+    }
+    final entry = _knownLibraries[id];
+    if (entry == null) {
+      throw ReceiverException(404, 'Open this library in Umbra Tags first.');
+    }
+    setState(() => _busy = true);
+    LibraryStore? store;
+    try {
+      store = _library?.id == id
+          ? _library!
+          : await LibraryStore.open(entry['path']!);
+      if (store.id != id) {
+        throw ReceiverException(
+          409,
+          'The library at this location has changed. Open it again in Umbra Tags.',
+        );
+      }
+      return await operation(store);
+    } finally {
+      if (store != null && !identical(store, _library)) await store.close();
+      if (mounted) setState(() => _busy = false);
+      if (_closeRequested && mounted) onWindowClose();
+    }
+  }
+
+  Future<void> _startWebReceiver() async {
+    if (!widget.startReceiver || !mounted || _closingWindow) return;
+    final receiver = ReceiverServer(
+      libraries: () async => _knownLibraries.entries
+          .map(
+            (entry) => <String, Object?>{
+              'id': entry.key,
+              'name': entry.value['name'],
+              'active': entry.key == _library?.id,
+            },
+          )
+          .toList(),
+      tags: (id) => _withWebLibrary(
+        id,
+        (store) async => (await store.tags())
+            .map(
+              (tag) => <String, Object?>{
+                'id': tag.id,
+                'name': tag.name,
+                'parentId': tag.parentId,
+              },
+            )
+            .toList(),
+      ),
+      capture: (capture) => _withWebLibrary(capture.libraryId, (store) async {
+        final result = await store.importCapture(
+          capture.bytes,
+          filename: capture.filename,
+          tagIds: capture.tagIds,
+          maxDimension: capture.maxDimension,
+        );
+        if (identical(store, _library)) await _reload();
+        if (mounted) {
+          setState(
+            () => _status =
+                '${result.duplicate ? 'Already in' : 'Received in'} ${store.name}: ${result.asset.originalFilename}',
+          );
+        }
+        return <String, Object?>{
+          'assetId': result.asset.id,
+          'duplicate': result.duplicate,
+          'libraryName': store.name,
+          'width': result.asset.width,
+          'height': result.asset.height,
+        };
+      }),
+    );
+    _receiver = receiver;
+    try {
+      await receiver.start();
+      if (!mounted || _closingWindow) {
+        await receiver.close();
+        return;
+      }
+      setState(() => _receiverStatus = 'Web receiver ready · localhost:8934');
+    } catch (error) {
+      if (mounted) {
+        setState(() => _receiverStatus = 'Web receiver unavailable: $error');
+      }
+    }
+  }
 
   @override
   void initState() {
     super.initState();
     windowManager.addListener(this);
+    _scrollController.addListener(_rememberScrollPosition);
     _restoreSession();
   }
 
   Future<void> _restoreSession() async {
-    final data = await _loadSession();
+    final data = await _loadSession(widget.sessionFile);
     if (!mounted) return;
     setState(() {
-      _tileSize = ((data['tileSize'] as num?)?.toDouble() ?? 200).clamp(
-        50,
-        400,
-      );
-      _previewWidth = ((data['previewWidth'] as num?)?.toDouble() ?? 300).clamp(
-        150,
-        800,
-      );
-      _lastLibraryPath = data['lastLibraryPath'] as String?;
+      _tileSize = _settingNumber(data['tileSize'], 200, 50, 400);
+      _previewWidth = _settingNumber(data['previewWidth'], 300, 150, 800);
+      _layout =
+          LayoutMode.values
+              .where((value) => value.name == data['layout'])
+              .firstOrNull ??
+          LayoutMode.crop;
+      _previewVisible = data['previewVisible'] is bool
+          ? data['previewVisible'] as bool
+          : true;
+      _lastLibraryPath = data['lastLibraryPath'] is String
+          ? data['lastLibraryPath'] as String
+          : null;
+      if (data['scrollPositions'] is Map) {
+        for (final entry in (data['scrollPositions'] as Map).entries) {
+          if (entry.key is String && entry.value is num) {
+            _scrollPositions[entry.key as String] = _settingNumber(
+              entry.value,
+              0,
+              0,
+              1e9,
+            );
+          }
+        }
+      }
+      _sessionRestored = true;
+      if (!Platform.isMacOS && data['webLibraries'] is List) {
+        for (final entry in data['webLibraries'] as List) {
+          if (entry is Map &&
+              entry['id'] is String &&
+              entry['name'] is String &&
+              entry['path'] is String) {
+            _knownLibraries[entry['id'] as String] = {
+              'name': entry['name'] as String,
+              'path': entry['path'] as String,
+            };
+          }
+        }
+      }
     });
     // A sandboxed Mac must reselect the folder to grant access for this session.
     if (!Platform.isMacOS &&
@@ -174,20 +367,30 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
         await _attach(await LibraryStore.open(_lastLibraryPath!));
       });
     }
+    await _startWebReceiver();
   }
 
   void _persistSession() {
+    if (!_sessionRestored) return;
     _sessionTimer?.cancel();
     _sessionTimer = Timer(const Duration(milliseconds: 350), _writeSession);
   }
 
   void _writeSession() {
+    if (!_sessionRestored) return;
     final data = <String, dynamic>{
       'tileSize': _tileSize,
       'previewWidth': _previewWidth,
+      'layout': _layout.name,
+      'previewVisible': _previewVisible,
+      'scrollPositions': Map<String, double>.from(_scrollPositions),
       'lastLibraryPath': _lastLibraryPath,
+      'webLibraries': _knownLibraries.entries
+          .map((entry) => {'id': entry.key, ...entry.value})
+          .toList(),
     };
-    _sessionWrite = _sessionWrite.then((_) => _saveSession(data));
+    final sessionFile = widget.sessionFile;
+    _sessionWrite = _sessionWrite.then((_) => _saveSession(data, sessionFile));
   }
 
   Future<void> _run(Future<void> Function() operation) async {
@@ -222,14 +425,17 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       await library.close();
       return;
     }
+    _rememberScrollPosition();
     await _library?.close();
     _library = library;
     _lastLibraryPath = library.root;
+    _knownLibraries[library.id] = {'name': library.name, 'path': library.root};
     _showArchived = false;
     _untagged = false;
     _tagFilter = null;
     _thumbnails.clear();
     await _reload();
+    _queueScrollRestore();
     _persistSession();
   }
 
@@ -322,6 +528,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   });
 
   void _closeLibrary() => _run(() async {
+    _rememberScrollPosition();
     await _library?.close();
     if (!mounted) return;
     setState(() {
@@ -383,12 +590,13 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   });
 
   void _setFilter(LibraryView view, [String? tag]) => _run(() async {
+    _rememberScrollPosition();
     _showArchived = view == LibraryView.archived;
     _untagged = view == LibraryView.untagged;
     _tagFilter = tag;
     _selectedPaths.clear();
     await _reload();
-    if (_scrollController.hasClients) _scrollController.jumpTo(0);
+    _queueScrollRestore();
   });
 
   void _editTag({LibraryTag? tag, String? parent}) => _run(() async {
@@ -467,14 +675,82 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     await _reload();
   });
 
-  void _selectImage(String path) => setState(() {
-    final keys = HardwareKeyboard.instance;
-    if (keys.isControlPressed || keys.isMetaPressed) {
-      if (!_selectedPaths.add(path)) _selectedPaths.remove(path);
-    } else {
-      _selectedPaths
-        ..clear()
-        ..add(path);
+  void _selectImage(String path) {
+    if (_busy) return;
+    _galleryFocus.requestFocus();
+    setState(() {
+      final keys = HardwareKeyboard.instance;
+      if (keys.isControlPressed || keys.isMetaPressed) {
+        if (!_selectedPaths.add(path)) _selectedPaths.remove(path);
+      } else {
+        _selectedPaths
+          ..clear()
+          ..add(path);
+      }
+    });
+  }
+
+  void _selectContextImage(String path) {
+    if (_busy) return;
+    _galleryFocus.requestFocus();
+    if (!_selectedPaths.contains(path)) {
+      setState(
+        () => _selectedPaths
+          ..clear()
+          ..add(path),
+      );
+    }
+  }
+
+  void _deleteSelection() => _run(() async {
+    final selected = _selection;
+    if (selected.isEmpty || _library == null) return;
+    if (selected.length > 1) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('Delete ${selected.length} images?'),
+          content: const Text(
+            'Permanently delete these images and their tag assignments from this library. Original files outside the library are kept. This cannot be undone.',
+          ),
+          actions: [
+            TextButton(
+              autofocus: true,
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Delete images'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+    final ids = selected.map((asset) => asset.id).toSet();
+    // Detach file-backed images before deletion: Windows can retain their file
+    // mappings until the preview, thumbnail and cached codec are disposed.
+    setState(() {
+      _selectedPaths.clear();
+      _assets.removeWhere((asset) => ids.contains(asset.id));
+      _imagePaths.removeWhere((path) => ids.contains(_assetsByPath[path]?.id));
+    });
+    await WidgetsBinding.instance.endOfFrame;
+    PaintingBinding.instance.imageCache.clear();
+    PaintingBinding.instance.imageCache.clearLiveImages();
+    try {
+      await _library!.deleteAssets(ids.toList());
+    } finally {
+      _thumbnails.clear();
+      await _reload();
+    }
+    if (mounted) {
+      setState(
+        () => _status =
+            '${selected.length} ${selected.length == 1 ? 'image' : 'images'} deleted',
+      );
+      _galleryFocus.requestFocus();
     }
   });
   void _archiveSelection() => _run(() async {
@@ -503,9 +779,11 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     _closeRequested = true;
     if (_busy || _closingWindow) return;
     _closingWindow = true;
+    _rememberScrollPosition();
     _sessionTimer?.cancel();
     _writeSession();
     await _sessionWrite;
+    await _receiver?.close();
     await _library?.close();
     await windowManager.destroy();
   }
@@ -521,11 +799,15 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
 
   @override
   void dispose() {
+    _rememberScrollPosition();
     _resizeTimer?.cancel();
     _sessionTimer?.cancel();
+    _writeSession();
     windowManager.removeListener(this);
+    unawaited(_receiver?.close() ?? Future<void>.value());
     unawaited(_library?.close() ?? Future<void>.value());
     _scrollController.dispose();
+    _galleryFocus.dispose();
     super.dispose();
   }
 
@@ -606,8 +888,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                 MenuItemButton(
                   onPressed: _imagePaths.isEmpty
                       ? null
-                      : () =>
-                            setState(() => _selectedPaths.addAll(_imagePaths)),
+                      : () {
+                          _galleryFocus.requestFocus();
+                          setState(() => _selectedPaths.addAll(_imagePaths));
+                        },
                   child: const Text('Select all'),
                 ),
                 MenuItemButton(
@@ -698,7 +982,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
             ],
             showSelectedIcon: false,
             selected: {_layout},
-            onSelectionChanged: (s) => setState(() => _layout = s.first),
+            onSelectionChanged: (s) {
+              setState(() => _layout = s.first);
+              _persistSession();
+            },
           ),
           const SizedBox(width: 16),
           const Icon(Icons.photo_size_select_large),
@@ -723,7 +1010,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                   : Icons.view_sidebar_outlined,
             ),
             tooltip: _previewVisible ? 'Hide preview' : 'Show preview',
-            onPressed: () => setState(() => _previewVisible = !_previewVisible),
+            onPressed: () {
+              setState(() => _previewVisible = !_previewVisible);
+              _persistSession();
+            },
           ),
           const SizedBox(width: 4),
         ],
@@ -761,6 +1051,20 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
             ),
             if (_selectedPaths.isNotEmpty)
               Text('${_selectedPaths.length} selected  '),
+            if (widget.startReceiver)
+              Tooltip(
+                message: _receiverStatus,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Icon(
+                    Icons.browser_updated,
+                    size: 20,
+                    color: _receiver?.port != null
+                        ? Colors.greenAccent
+                        : Colors.orangeAccent,
+                  ),
+                ),
+              ),
             if (_library != null)
               FilledButton.icon(
                 onPressed: _busy ? null : _importImages,
@@ -847,6 +1151,11 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                         );
                       }
                       Widget grid;
+                      if (_pendingScrollOffset != null) {
+                        WidgetsBinding.instance.addPostFrameCallback(
+                          (_) => _restoreScrollPosition(),
+                        );
+                      }
                       if (_layout == LayoutMode.masonry) {
                         grid = MasonryGridView.builder(
                           key: _gridKey,
@@ -871,6 +1180,9 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                               _imagePaths[index],
                             ),
                             onTap: () => _selectImage(_imagePaths[index]),
+                            onContextSelect: () =>
+                                _selectContextImage(_imagePaths[index]),
+                            onDelete: _busy ? null : _deleteSelection,
                           ),
                         );
                       } else {
@@ -897,52 +1209,69 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                               _imagePaths[index],
                             ),
                             onTap: () => _selectImage(_imagePaths[index]),
+                            onContextSelect: () =>
+                                _selectContextImage(_imagePaths[index]),
+                            onDelete: _busy ? null : _deleteSelection,
                           ),
                         );
                       }
 
-                      return Listener(
-                        onPointerDown: (e) {
-                          // Only start marquee on left button drag, not scroll wheel
-                          if (e.buttons == 1) {
-                            setState(() {
-                              _dragStart = e.localPosition;
-                              _dragCurrent = e.localPosition;
-                            });
+                      return Focus(
+                        focusNode: _galleryFocus,
+                        onKeyEvent: (node, event) {
+                          if (event is KeyDownEvent &&
+                              event.logicalKey == LogicalKeyboardKey.delete &&
+                              !_busy &&
+                              _selectedPaths.isNotEmpty) {
+                            _deleteSelection();
+                            return KeyEventResult.handled;
                           }
+                          return KeyEventResult.ignored;
                         },
-                        onPointerMove: (e) {
-                          if (_dragStart != null) {
-                            setState(() => _dragCurrent = e.localPosition);
-                            _updateMarqueeSelection();
-                          }
-                        },
-                        onPointerUp: (_) => setState(() {
-                          _dragStart = null;
-                          _dragCurrent = null;
-                        }),
-                        child: ScrollConfiguration(
-                          behavior: _GalleryScrollBehavior(),
-                          child: Scrollbar(
-                            controller: _scrollController,
-                            thickness: 8,
-                            radius: const Radius.circular(4),
-                            child: Padding(
-                              padding: const EdgeInsets.only(right: 12),
-                              child: Stack(
-                                children: [
-                                  grid,
-                                  if (_selectionRect != null)
-                                    Positioned.fill(
-                                      child: IgnorePointer(
-                                        child: CustomPaint(
-                                          painter: _MarqueePainter(
-                                            _selectionRect!,
+                        child: Listener(
+                          onPointerDown: (e) {
+                            // Only start marquee on left button drag, not scroll wheel
+                            if (e.buttons == 1) {
+                              _galleryFocus.requestFocus();
+                              setState(() {
+                                _dragStart = e.localPosition;
+                                _dragCurrent = e.localPosition;
+                              });
+                            }
+                          },
+                          onPointerMove: (e) {
+                            if (_dragStart != null) {
+                              setState(() => _dragCurrent = e.localPosition);
+                              _updateMarqueeSelection();
+                            }
+                          },
+                          onPointerUp: (_) => setState(() {
+                            _dragStart = null;
+                            _dragCurrent = null;
+                          }),
+                          child: ScrollConfiguration(
+                            behavior: _GalleryScrollBehavior(),
+                            child: Scrollbar(
+                              controller: _scrollController,
+                              thickness: 8,
+                              radius: const Radius.circular(4),
+                              child: Padding(
+                                padding: const EdgeInsets.only(right: 12),
+                                child: Stack(
+                                  children: [
+                                    grid,
+                                    if (_selectionRect != null)
+                                      Positioned.fill(
+                                        child: IgnorePointer(
+                                          child: CustomPaint(
+                                            painter: _MarqueePainter(
+                                              _selectionRect!,
+                                            ),
                                           ),
                                         ),
                                       ),
-                                    ),
-                                ],
+                                  ],
+                                ),
                               ),
                             ),
                           ),
@@ -1030,6 +1359,8 @@ class GalleryTile extends StatelessWidget {
     required this.layout,
     required this.selected,
     required this.onTap,
+    this.onContextSelect,
+    this.onDelete,
   });
 
   final String path;
@@ -1040,6 +1371,7 @@ class GalleryTile extends StatelessWidget {
   final LayoutMode layout;
   final bool selected;
   final VoidCallback onTap;
+  final VoidCallback? onContextSelect, onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -1106,6 +1438,7 @@ class GalleryTile extends StatelessWidget {
   }
 
   Future<void> _showContextMenu(BuildContext context, Offset position) async {
+    onContextSelect?.call();
     final choice = await showMenu<String>(
       context: context,
       position: RelativeRect.fromLTRB(
@@ -1115,12 +1448,18 @@ class GalleryTile extends StatelessWidget {
         position.dy,
       ),
       popUpAnimationStyle: AnimationStyle.noAnimation,
-      items: const [
-        PopupMenuItem(value: 'copy', child: Text('Copy file path')),
-        PopupMenuItem(value: 'info', child: Text('Image info')),
+      items: [
+        const PopupMenuItem(value: 'copy', child: Text('Copy file path')),
+        const PopupMenuItem(value: 'info', child: Text('Image info')),
+        PopupMenuItem(
+          value: 'delete',
+          enabled: onDelete != null,
+          child: const Text('Delete'),
+        ),
       ],
     );
     if (choice == 'copy') await Clipboard.setData(ClipboardData(text: path));
+    if (choice == 'delete' && context.mounted) onDelete?.call();
     if (choice == 'info' && context.mounted) {
       await showDialog<void>(
         context: context,

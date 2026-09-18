@@ -1,126 +1,182 @@
-// Standalone MVP receiver: run with `dart run lib/receiver_server.dart`.
-// Listens for POST /upload requests with raw image bytes and saves them
-// to disk. Not wired into the Flutter app yet — this just proves the
-// extension -> local server round trip works.
-
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
 const int kPort = 8934;
-const int kMaxUploadBytes = 25 * 1024 * 1024; // 25 MB
+const int kMaxUploadBytes = 25 * 1024 * 1024;
 
-Future<Directory> _incomingDir() async {
-  final appData = Platform.environment['APPDATA'] ?? '.';
-  final dir = Directory('$appData/Umbra Tags/incoming');
-  if (!await dir.exists()) await dir.create(recursive: true);
-  return dir;
+class ReceiverException implements Exception {
+  ReceiverException(this.status, this.message);
+  final int status;
+  final String message;
 }
 
-void _addCorsHeaders(HttpResponse response) {
-  response.headers.set('Access-Control-Allow-Origin', '*');
-  response.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  response.headers.set('Access-Control-Allow-Headers', 'Content-Type');
+class WebCapture {
+  WebCapture(
+    this.libraryId,
+    this.filename,
+    this.tagIds,
+    this.maxDimension,
+    this.bytes,
+  );
+  final String libraryId, filename;
+  final List<String> tagIds;
+  final int maxDimension;
+  final Uint8List bytes;
 }
 
-bool _startsWith(List<int> bytes, List<int> prefix) {
-  if (bytes.length < prefix.length) return false;
-  for (var i = 0; i < prefix.length; i++) {
-    if (bytes[i] != prefix[i]) return false;
+/// Owned by the desktop app. All file access is delegated to its library stores.
+class ReceiverServer {
+  ReceiverServer({
+    required this.libraries,
+    required this.tags,
+    required this.capture,
+  });
+  final Future<List<Map<String, Object?>>> Function() libraries;
+  final Future<List<Map<String, Object?>>> Function(String libraryId) tags;
+  final Future<Map<String, Object?>> Function(WebCapture capture) capture;
+  HttpServer? _server;
+  bool _uploading = false;
+  int? get port => _server?.port;
+
+  Future<void> start({int port = kPort}) async {
+    if (_server != null) return;
+    _server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
+    _server!.listen(_handle);
   }
-  return true;
-}
 
-/// Determines the real image type from magic bytes, ignoring whatever the
-/// client claimed via Content-Type. Returns null if the bytes don't match
-/// a known image signature.
-String? _extensionFromMagicBytes(Uint8List bytes) {
-  if (_startsWith(bytes, [0xFF, 0xD8, 0xFF])) return 'jpg';
-  if (_startsWith(bytes, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])) {
-    return 'png';
+  Future<void> close() async {
+    final server = _server;
+    _server = null;
+    await server?.close(force: true);
   }
-  if (_startsWith(bytes, [0x47, 0x49, 0x46, 0x38])) return 'gif'; // GIF8
-  if (bytes.length >= 12 &&
-      _startsWith(bytes, [0x52, 0x49, 0x46, 0x46]) && // 'RIFF'
-      bytes[8] == 0x57 && // 'W'
-      bytes[9] == 0x45 && // 'E'
-      bytes[10] == 0x42 && // 'B'
-      bytes[11] == 0x50) {
-    // 'P'
-    return 'webp';
-  }
-  return null;
-}
 
-/// Reads the request body up to [kMaxUploadBytes], throwing if exceeded so
-/// we never buffer an unbounded amount of attacker-controlled data.
-Future<Uint8List> _readBodyLimited(HttpRequest request) async {
-  final builder = BytesBuilder(copy: false);
-  var total = 0;
-  await for (final chunk in request) {
-    total += chunk.length;
-    if (total > kMaxUploadBytes) {
-      throw StateError('Upload exceeds max size of $kMaxUploadBytes bytes');
-    }
-    builder.add(chunk);
-  }
-  return builder.takeBytes();
-}
-
-Future<void> main() async {
-  // Loopback-only: do not change to anyIPv4 without re-adding auth, since
-  // that would expose the upload endpoint to the whole LAN.
-  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, kPort);
-  print('Receiver listening on http://localhost:$kPort');
-
-  await for (final request in server) {
-    _addCorsHeaders(request.response);
-
-    if (request.method == 'OPTIONS') {
-      request.response.statusCode = HttpStatus.noContent;
-      await request.response.close();
-      continue;
-    }
-
-    if (request.method == 'POST' && request.uri.path == '/upload') {
-      try {
-        final bytes = await _readBodyLimited(request);
-        final ext = _extensionFromMagicBytes(bytes);
-        if (ext == null) {
-          print('Rejected upload: not a recognized image format');
-          request.response.statusCode = HttpStatus.badRequest;
-          request.response.headers.contentType = ContentType.json;
-          request.response
-              .write(jsonEncode({'ok': false, 'error': 'unrecognized image format'}));
-          await request.response.close();
-          continue;
-        }
-
-        final dir = await _incomingDir();
-        final filename = '${DateTime.now().millisecondsSinceEpoch}.$ext';
-        final file = File('${dir.path}/$filename');
-        await file.writeAsBytes(bytes);
-
-        print('Saved ${bytes.length} bytes -> ${file.path}');
-
-        request.response.statusCode = HttpStatus.ok;
-        request.response.headers.contentType = ContentType.json;
-        request.response.write(jsonEncode({'ok': true, 'file': filename}));
-      } on StateError catch (e) {
-        print('Rejected upload: $e');
-        request.response.statusCode = HttpStatus.requestEntityTooLarge;
-        request.response.headers.contentType = ContentType.json;
-        request.response.write(jsonEncode({'ok': false, 'error': '$e'}));
-      } catch (e) {
-        print('Error saving upload: $e');
-        request.response.statusCode = HttpStatus.internalServerError;
-        request.response.headers.contentType = ContentType.json;
-        request.response.write(jsonEncode({'ok': false, 'error': '$e'}));
+  Future<void> _handle(HttpRequest request) async {
+    final response = request.response;
+    var ownsUpload = false;
+    try {
+      final origin = request.headers.value('origin');
+      final host = request.headers.value('host')?.split(':').first;
+      if ((host != '127.0.0.1' && host != 'localhost') ||
+          (origin != null &&
+              !RegExp(r'^chrome-extension://[a-p]{32}$').hasMatch(origin))) {
+        throw ReceiverException(
+          403,
+          'Only local browser extensions may use this receiver.',
+        );
       }
-    } else {
-      request.response.statusCode = HttpStatus.notFound;
+      if (origin != null) {
+        response.headers.set('Access-Control-Allow-Origin', origin);
+      }
+      response.headers.set('Vary', 'Origin');
+      response.headers.set('Cache-Control', 'no-store');
+      if (request.method == 'OPTIONS') {
+        response.headers.set(
+          'Access-Control-Allow-Methods',
+          'GET, POST, OPTIONS',
+        );
+        response.headers.set(
+          'Access-Control-Allow-Headers',
+          'Content-Type, X-Umbra-Client',
+        );
+        response.statusCode = 204;
+        return;
+      }
+      // Requiring a non-simple header also blocks ordinary HTML form submissions.
+      if (request.headers.value('x-umbra-client') != 'web-beam') {
+        throw ReceiverException(
+          403,
+          'Missing Umbra extension protocol header.',
+        );
+      }
+      final path = request.uri.path;
+      Object result;
+      if (request.method == 'GET' && path == '/libraries') {
+        result = {'ok': true, 'libraries': await libraries()};
+      } else if (request.method == 'GET' && path == '/tags') {
+        result = {
+          'ok': true,
+          'tags': await tags(request.uri.queryParameters['libraryId'] ?? ''),
+        };
+      } else if (request.method == 'POST' && path == '/upload') {
+        if (_uploading) {
+          throw ReceiverException(
+            409,
+            'Another image is arriving. Try again shortly.',
+          );
+        }
+        _uploading = ownsUpload = true;
+        final query = request.uri.queryParameters;
+        final libraryId = query['libraryId'] ?? '';
+        if (libraryId.isEmpty) {
+          throw ReceiverException(
+            400,
+            'Choose a destination library in the extension.',
+          );
+        }
+        final limit = int.tryParse(query['maxDimension'] ?? '0');
+        if (limit == null || limit < 0 || limit > 16384) {
+          throw ReceiverException(400, 'Maximum edge must be 0–16384 pixels.');
+        }
+        final tagIds = request.uri.queryParametersAll['tagId'] ?? <String>[];
+        if (tagIds.length > 200 || tagIds.any((id) => id.length > 64)) {
+          throw ReceiverException(400, 'Too many or invalid tags.');
+        }
+        if (request.contentLength > kMaxUploadBytes) {
+          throw ReceiverException(413, 'Image exceeds 25 MB.');
+        }
+        final builder = BytesBuilder(copy: false);
+        await for (final chunk in request.timeout(
+          const Duration(seconds: 30),
+        )) {
+          if (builder.length + chunk.length > kMaxUploadBytes) {
+            throw ReceiverException(413, 'Image exceeds 25 MB.');
+          }
+          builder.add(chunk);
+        }
+        if (builder.isEmpty) throw ReceiverException(400, 'Image is empty.');
+        result = {
+          'ok': true,
+          ...await capture(
+            WebCapture(
+              libraryId,
+              query['filename'] ?? 'web-image',
+              tagIds.toSet().toList(),
+              limit,
+              builder.takeBytes(),
+            ),
+          ),
+        };
+      } else {
+        throw ReceiverException(404, 'Unknown receiver endpoint.');
+      }
+      response.headers.contentType = ContentType.json;
+      response.write(jsonEncode(result));
+    } catch (error) {
+      response.statusCode = error is ReceiverException
+          ? error.status
+          : error is TimeoutException
+          ? 408
+          : 400;
+      response.headers.contentType = ContentType.json;
+      response.write(
+        jsonEncode({
+          'ok': false,
+          'error': error is ReceiverException
+              ? error.message
+              : error.toString(),
+        }),
+      );
+    } finally {
+      if (ownsUpload) _uploading = false;
+      try {
+        await response.close();
+      } on HttpException {
+        // A browser may close its popup or cancel an upload before the reply.
+      } on SocketException {
+        // A completed import remains saved even when the client disconnects.
+      }
     }
-
-    await request.response.close();
   }
 }

@@ -60,8 +60,10 @@ ordinary file and is never embedded in SQLite. Media is immutable in this versio
    UI supports JPEG, PNG, GIF, WebP and BMP. Videos and editing are not implemented.
 3. Exact duplicates return the existing asset; if its media is missing, restore that
    file from the copy. Archived duplicates remain archived.
-4. Flush a `staging/<UUID>.json` journal containing the future asset row.
-5. Rename the staged media into its ID-based location, then insert the row.
+4. Flush a `staging/<UUID>.json` journal containing the future asset row and optional `tag_ids`.
+5. Rename the staged media into its ID-based location, then insert the asset and its
+   tag assignments in one transaction. Web imports validate selected tags first;
+   duplicate web imports add those tags to the existing asset.
 6. Remove the journal after the database commit.
 
 Open replays completed journals, verifies bytes against SHA-256, and finishes interrupted
@@ -72,6 +74,14 @@ or filesystem failure. SQLite uses DELETE journaling and FULL synchronous mode.
 
 ## Cache, missing files, backups
 
+Permanent deletion writes a flushed `staging/delete-<UUID>.json` journal with the
+asset IDs, relative media paths and content hashes before removing library media
+and current thumbnails. Catalog deletion and cascading tag/prediction removal happen
+in one transaction. Source files outside the library and tag definitions are kept.
+On reopen, import recovery runs first, then unfinished deletions are completed.
+A filesystem error can leave a deletion pending until the library is reopened;
+its journal is retained. There is no undo or recycle-bin integration.
+
 Thumbnail requests are lazy, serialized in a worker isolate, and produce JPEGs with a
 1280-pixel longest edge (JPEG quality 92), without enlarging smaller originals. The gallery uses a bounded map of requests and Flutter's image
 cache. Deleting `cache/` while the app is closed is safe; it is recreated on demand.
@@ -80,7 +90,9 @@ Cache version suffix `v2` identifies the thumbnail recipe.
 
 Refresh marks absent media `missing=1` without removing tags or records. This version
 does not adopt files manually dropped into `media/`, detect external content edits, or
-integrate the standalone Chrome receiver. Use Import Images for ingestion.
+watch external folders. Use Import Images or the Web Beam Chrome extension for ingestion.
+The desktop app hosts the extension receiver on loopback port 8934. An optional
+longest-edge cap resizes web images before ingestion; the stored media is then immutable.
 
 Back Up Metadata uses `VACUUM INTO` to create a consistent SQLite snapshot. It does
 not copy originals and therefore is not a complete library backup. For a full portable
@@ -95,7 +107,7 @@ active lock. The Dart facade also blocks duplicate opens within the same process
 Network filesystems/cloud-sync live editing are not supported. Choose a writable local
 or attached-drive folder with filesystem locking and rename support.
 
-Flutter UI settings and the last-used folder live under the OS application-support
+Flutter UI settings, the last-used folder and known web destination libraries live under the OS application-support
 directory in `Umbra Tags/flutter-session.json`. These are conveniences, not library
 data. Sandboxed macOS users reselect the library on each launch to grant access; durable
 security-scoped bookmarks are not implemented. Both macOS entitlement files grant
