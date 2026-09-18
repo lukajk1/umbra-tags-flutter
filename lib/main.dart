@@ -11,6 +11,8 @@ import 'package:file_selector/file_selector.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'storage/library_store.dart';
+import 'storage/tag_repository.dart';
+import 'widgets/tag_widgets.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -130,6 +132,13 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   bool _closeRequested = false;
   bool _closingWindow = false;
   bool _showArchived = false;
+  bool _untagged = false;
+  String? _tagFilter;
+  List<LibraryTag> _tags = [];
+  List<LibraryAsset> get _selection => _selectedPaths
+      .map((path) => _assetsByPath[path])
+      .whereType<LibraryAsset>()
+      .toList();
   String _status = 'Create or open a library to begin';
   String? _lastLibraryPath;
   Timer? _sessionTimer;
@@ -217,16 +226,27 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     _library = library;
     _lastLibraryPath = library.root;
     _showArchived = false;
+    _untagged = false;
+    _tagFilter = null;
     _thumbnails.clear();
     await _reload();
     _persistSession();
   }
 
   Future<void> _reload() async {
-    final assets = await _library!.assets(archived: _showArchived);
+    final tags = await _library!.tags();
+    if (_tagFilter != null && !tags.any((tag) => tag.id == _tagFilter)) {
+      _tagFilter = null;
+    }
+    final assets = await _library!.assets(
+      archived: _showArchived,
+      untagged: _untagged,
+      tagId: _tagFilter,
+    );
     if (!mounted) return;
     setState(() {
       _assets = assets;
+      _tags = tags;
       _imagePaths = assets
           .map((a) => _library!.absolutePath(a.relativePath))
           .toList();
@@ -306,6 +326,9 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     if (!mounted) return;
     setState(() {
       _library = null;
+      _tags = [];
+      _tagFilter = null;
+      _untagged = false;
       _assets = [];
       _imagePaths = [];
       _assetsByPath.clear();
@@ -359,6 +382,101 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     if (errors.isNotEmpty) throw LibraryException(errors.join('\n'));
   });
 
+  void _setFilter(LibraryView view, [String? tag]) => _run(() async {
+    _showArchived = view == LibraryView.archived;
+    _untagged = view == LibraryView.untagged;
+    _tagFilter = tag;
+    _selectedPaths.clear();
+    await _reload();
+    if (_scrollController.hasClients) _scrollController.jumpTo(0);
+  });
+
+  void _editTag({LibraryTag? tag, String? parent}) => _run(() async {
+    await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => TagDetailsDialog(
+        tags: _tags,
+        tag: tag,
+        parentId: parent,
+        onSave: (name, parentId) async {
+          await _library!.saveTag(id: tag?.id, name: name, parentId: parentId);
+        },
+      ),
+    );
+    await _reload();
+  });
+
+  void _deleteTag(LibraryTag tag) => _run(() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Delete “${tag.name}”?'),
+        content: const Text(
+          'This removes the tag from all images. Child tags move up one level. Images are kept.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete tag'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await _library!.deleteTag(tag.id);
+      await _reload();
+    }
+  });
+
+  void _editSelectionTags() => _run(() async {
+    final selected = _selection;
+    if (selected.isEmpty) return;
+    if (_tags.isEmpty) {
+      await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => TagDetailsDialog(
+          tags: _tags,
+          onSave: (name, parent) async {
+            await _library!.saveTag(name: name, parentId: parent);
+          },
+        ),
+      );
+      await _reload();
+      if (_tags.isEmpty || !mounted) return;
+    }
+    if (!mounted) return;
+    await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => BatchTagsDialog(
+        tags: _tags,
+        assets: selected,
+        onSave: (add, remove) => _library!.editTags(
+          selected.map((a) => a.id).toList(),
+          add: add,
+          remove: remove,
+        ),
+      ),
+    );
+    await _reload();
+  });
+
+  void _selectImage(String path) => setState(() {
+    final keys = HardwareKeyboard.instance;
+    if (keys.isControlPressed || keys.isMetaPressed) {
+      if (!_selectedPaths.add(path)) _selectedPaths.remove(path);
+    } else {
+      _selectedPaths
+        ..clear()
+        ..add(path);
+    }
+  });
   void _archiveSelection() => _run(() async {
     await _library!.archive(
       _selectedPaths.map((path) => _assetsByPath[path]!.id).toList(),
@@ -495,6 +613,12 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                 MenuItemButton(
                   onPressed: _busy || _selectedPaths.isEmpty
                       ? null
+                      : _editSelectionTags,
+                  child: const Text('Edit tags…'),
+                ),
+                MenuItemButton(
+                  onPressed: _busy || _selectedPaths.isEmpty
+                      ? null
                       : _archiveSelection,
                   child: Text(
                     _showArchived ? 'Restore selected' : 'Archive selected',
@@ -517,6 +641,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                       ? null
                       : () => _run(() async {
                           _showArchived = !_showArchived;
+                          _untagged = false;
+                          _tagFilter = null;
                           await _reload();
                         }),
                   child: Text(_showArchived ? 'Show library' : 'Show archive'),
@@ -683,6 +809,22 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
             )
           : Row(
               children: [
+                TagSidebar(
+                  tags: _tags,
+                  view: _showArchived
+                      ? LibraryView.archived
+                      : _untagged
+                      ? LibraryView.untagged
+                      : LibraryView.all,
+                  selectedTag: _tagFilter,
+                  busy: _busy,
+                  onView: (view) => _setFilter(view),
+                  onSelect: (id) => _setFilter(LibraryView.all, id),
+                  onCreate: (parent) => _editTag(parent: parent),
+                  onEdit: (tag) => _editTag(tag: tag),
+                  onDelete: _deleteTag,
+                ),
+                const VerticalDivider(width: 1),
                 Expanded(
                   child: LayoutBuilder(
                     builder: (context, constraints) {
@@ -697,6 +839,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                           child: Text(
                             _showArchived
                                 ? 'No archived images'
+                                : _tagFilter != null || _untagged
+                                ? 'No images match this filter'
                                 : 'Import images to fill this library',
                             style: const TextStyle(color: Colors.white54),
                           ),
@@ -726,10 +870,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                             selected: _selectedPaths.contains(
                               _imagePaths[index],
                             ),
-                            onTap: () => setState(() {
-                              _selectedPaths.clear();
-                              _selectedPaths.add(_imagePaths[index]);
-                            }),
+                            onTap: () => _selectImage(_imagePaths[index]),
                           ),
                         );
                       } else {
@@ -755,10 +896,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                             selected: _selectedPaths.contains(
                               _imagePaths[index],
                             ),
-                            onTap: () => setState(() {
-                              _selectedPaths.clear();
-                              _selectedPaths.add(_imagePaths[index]);
-                            }),
+                            onTap: () => _selectImage(_imagePaths[index]),
                           ),
                         );
                       }
@@ -830,32 +968,47 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                   ),
                   // Preview pane
                   SizedBox(
-                    width: _previewWidth,
+                    width: _previewWidth.clamp(
+                      150,
+                      (MediaQuery.sizeOf(context).width - 500).clamp(150, 800),
+                    ),
                     child: DecoratedBox(
                       decoration: const BoxDecoration(color: AppColors.darker),
-                      child: SizedBox.expand(
-                        child: _selectedPaths.isNotEmpty
-                            ? Image.file(
-                                File(_selectedPaths.first),
-                                fit: BoxFit.contain,
-                                cacheWidth:
-                                    (_previewWidth *
-                                            MediaQuery.devicePixelRatioOf(
-                                              context,
-                                            ))
-                                        .ceil(),
-                                errorBuilder: (_, _, _) => const Center(
-                                  child: Text(
-                                    'Original file is missing or unreadable',
-                                  ),
-                                ),
-                              )
-                            : const Center(
-                                child: Text(
-                                  'No image selected',
-                                  style: TextStyle(color: Colors.white24),
-                                ),
-                              ),
+                      child: Column(
+                        children: [
+                          Expanded(
+                            child: SizedBox.expand(
+                              child: _selectedPaths.isNotEmpty
+                                  ? Image.file(
+                                      File(_selectedPaths.first),
+                                      fit: BoxFit.contain,
+                                      cacheWidth:
+                                          (_previewWidth *
+                                                  MediaQuery.devicePixelRatioOf(
+                                                    context,
+                                                  ))
+                                              .ceil(),
+                                      errorBuilder: (_, _, _) => const Center(
+                                        child: Text(
+                                          'Original file is missing or unreadable',
+                                        ),
+                                      ),
+                                    )
+                                  : const Center(
+                                      child: Text(
+                                        'No image selected',
+                                        style: TextStyle(color: Colors.white24),
+                                      ),
+                                    ),
+                            ),
+                          ),
+                          if (_selectedPaths.isNotEmpty)
+                            SelectionTags(
+                              tags: _tags,
+                              assets: _selection,
+                              onEdit: _busy ? null : _editSelectionTags,
+                            ),
+                        ],
                       ),
                     ),
                   ),

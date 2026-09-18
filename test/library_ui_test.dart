@@ -7,6 +7,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_gallery_test/main.dart';
 import 'package:flutter_gallery_test/storage/library_store.dart';
+import 'package:flutter_gallery_test/widgets/tag_widgets.dart';
 import 'package:image/image.dart' as img;
 import 'package:path/path.dart' as p;
 
@@ -97,6 +98,67 @@ void main() {
     );
     expect(find.text('1 selected  '), findsOneWidget);
     expect(source.existsSync(), isTrue);
+    await tester.tap(find.byTooltip('New tag'));
+    await _until(
+      tester,
+      () => find.byType(TagDetailsDialog).evaluate().isNotEmpty,
+    );
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(TagDetailsDialog),
+        matching: find.byType(TextField),
+      ),
+      'Portraits',
+    );
+    await tester.tap(find.text('Save tag'));
+    await _until(
+      tester,
+      () =>
+          find.byType(TagDetailsDialog).evaluate().isEmpty &&
+          find.byType(CircularProgressIndicator).evaluate().isEmpty,
+    );
+    await tester.tap(find.text('Edit tags'));
+    await _until(
+      tester,
+      () => find.byType(BatchTagsDialog).evaluate().isNotEmpty,
+    );
+    await tester.tap(
+      find.descendant(
+        of: find.byType(BatchTagsDialog),
+        matching: find.byType(CheckboxListTile),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Apply tags'));
+    await _until(
+      tester,
+      () =>
+          find.byType(BatchTagsDialog).evaluate().isEmpty &&
+          find.byType(CircularProgressIndicator).evaluate().isEmpty,
+    );
+    expect(find.byType(Chip), findsOneWidget);
+    await tester.tap(find.text('Untagged'));
+    await _until(
+      tester,
+      () => find.text('No images match this filter').evaluate().isNotEmpty,
+    );
+    await tester.tap(find.text('Portraits'));
+    await _until(
+      tester,
+      () =>
+          find.byType(GalleryTile).evaluate().length == 1 &&
+          find.byType(CircularProgressIndicator).evaluate().isEmpty,
+    );
+    await tester.tap(find.byType(GalleryTile));
+    await _until(
+      tester,
+      () =>
+          tester
+              .widgetList<RawImage>(find.byType(RawImage))
+              .where((image) => image.image != null)
+              .length ==
+          2,
+    );
     expect(tester.takeException(), isNull);
     await tester.runAsync(() async {
       final boundary =
@@ -135,6 +197,10 @@ void main() {
     await tester.runAsync(() async {
       final store = await LibraryStore.open(root.path);
       expect((await store.assets()).single.originalFilename, 'sample.png');
+      expect((await store.tags()).single.name, 'Portraits');
+      expect((await store.assets()).single.tagIds, [
+        (await store.tags()).single.id,
+      ]);
       await store.close();
     });
   });

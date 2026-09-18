@@ -10,6 +10,7 @@ import 'package:sqlite3/sqlite3.dart';
 import 'package:uuid/uuid.dart';
 
 import 'schema.dart';
+import 'tag_repository.dart';
 
 class LibraryException implements Exception {
   LibraryException(this.message);
@@ -27,11 +28,15 @@ class LibraryAsset {
       height = row['height'] as int,
       contentHash = row['sha256'] as String,
       missing = row['missing'] == 1,
-      archived = row['archived'] == 1;
+      archived = row['archived'] == 1,
+      tagIds = List<String>.unmodifiable(
+        (row['tag_ids'] as List?)?.cast<String>() ?? const <String>[],
+      );
 
   final String id, relativePath, originalFilename, contentHash;
   final int width, height;
   final bool missing, archived;
+  final List<String> tagIds;
   String get thumbnailRelativePath =>
       'cache/thumbnails/$id-$contentHash-v2.jpg';
 }
@@ -117,8 +122,17 @@ class LibraryStore {
   }
 
   String absolutePath(String relative) => _resolve(root, relative);
-  Future<List<LibraryAsset>> assets({bool archived = false}) async =>
-      (await _call('assets', archived) as List)
+  Future<List<LibraryAsset>> assets({
+    bool archived = false,
+    bool untagged = false,
+    String? tagId,
+  }) async =>
+      (await _call('assets', {
+                'archived': archived,
+                'untagged': untagged,
+                'tagId': tagId,
+              })
+              as List)
           .map(
             (row) =>
                 LibraryAsset.fromMap(Map<String, Object?>.from(row as Map)),
@@ -144,6 +158,28 @@ class LibraryStore {
   }
 
   Future<String> backup() async => await _call('backup') as String;
+
+  Future<List<LibraryTag>> tags() async => (await _call('tags') as List)
+      .map((row) => LibraryTag.fromMap(row as Map))
+      .toList();
+  Future<String> saveTag({
+    String? id,
+    required String name,
+    String? parentId,
+  }) async =>
+      await _call('saveTag', {'id': id, 'name': name, 'parentId': parentId})
+          as String;
+  Future<void> deleteTag(String id) async {
+    await _call('deleteTag', id);
+  }
+
+  Future<void> editTags(
+    List<String> assetIds, {
+    List<String> add = const [],
+    List<String> remove = const [],
+  }) async {
+    await _call('editTags', {'assets': assetIds, 'add': add, 'remove': remove});
+  }
 
   Future<void> close() => _closing ??= _close();
 
@@ -326,13 +362,27 @@ class _LibraryEngine {
   Object? dispatch(String method, Object? args) {
     switch (method) {
       case 'assets':
-        return db
-            .select(
-              'SELECT * FROM assets WHERE archived = ? ORDER BY imported_at DESC, id',
-              [args == true ? 1 : 0],
-            )
-            .map((r) => Map<String, Object?>.from(r))
-            .toList();
+        return TagRepository(db).assets(args as Map);
+      case 'tags':
+        return TagRepository(db).tags();
+      case 'saveTag':
+        final values = args as Map;
+        return TagRepository(db).save(
+          id: values['id'] as String?,
+          name: values['name'] as String,
+          parentId: values['parentId'] as String?,
+        );
+      case 'deleteTag':
+        TagRepository(db).delete(args as String);
+        return null;
+      case 'editTags':
+        final values = args as Map;
+        TagRepository(db).editAssignments(
+          (values['assets'] as List).cast<String>(),
+          (values['add'] as List).cast<String>(),
+          (values['remove'] as List).cast<String>(),
+        );
+        return null;
       case 'import':
         return _import(args as String);
       case 'thumbnail':

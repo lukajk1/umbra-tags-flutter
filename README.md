@@ -37,8 +37,8 @@ database. Only one cooperating application may edit a library at once.
 ## Scope
 
 This is the new library/storage foundation, not a complete port of WinForms. The
-catalog includes tables for tags, groups, predictions and jobs; their feature UIs and
-classifier integration are future work. Legacy save conversion is intentionally deferred.
+app supports nested tags, batch assignment, and tag-based filtering. Tag groups and
+classifier integration are future work; their storage tables already exist. Legacy save conversion is intentionally deferred.
 The standalone `lib/receiver_server.dart` experiment is not wired into library imports.
 The current import flow supports JPEG, PNG, GIF, WebP and BMP, not videos.
 
@@ -46,3 +46,18 @@ Tests cover moving libraries, duplicate imports, archival, missing media restora
 cache regeneration, backups, schema rejection, interrupted-import recovery, and the
 create/import/preview/close/reopen UI flow. A widget-test screenshot is written to
 `build/portable-library-ui.png` (Flutter's test font is intentionally non-production).
+
+## Tagging
+
+Use **+** in the Tags sidebar to create a tag. Its menu offers Add Child Tag,
+Rename / Move, and Delete. Deletion removes that tag's assignments and moves its
+children to its parent; it never deletes images. Tag names are globally unique
+within the library (ASCII case insensitive).
+
+Select images with click, Ctrl/Cmd-click, or marquee selection, then choose **Edit
+tags** below the preview or **Edit → Edit tags…**. A dash means some selected images
+have the tag. Changes apply to the whole selection; untouched assignments remain.
+
+Click a sidebar tag to filter by that tag and all descendants. All Images and
+Untagged exclude archived images; Archived shows only archived images. The tag search
+field narrows the sidebar, not filenames. Existing libraries need no migration.

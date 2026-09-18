@@ -41,7 +41,7 @@ versions are rejected without migration. The manifest ID must match the sole lib
   dimensions after EXIF orientation, byte size, import/source dates, exact SHA-256,
   optional perceptual hash, archive and missing flags. SHA-256 is unique per library.
 * `tag_groups`, `tags`, `asset_tags`: normalized organization. Tag hierarchy uses
-  parent IDs; children and depth are derived. Future tag operations must additionally
+  parent IDs; children and depth are derived. Tag operations
   prevent multi-node cycles. SQLite NOCASE uniqueness is ASCII case insensitive.
 * `predictions`: model/version, label, confidence, analyzed content hash, and date.
   Suggestions are separate from confirmed tags. No classifier is invoked yet.
@@ -106,4 +106,4 @@ user-selected read/write file access.
 File: New Library (choose an empty folder), Open Library, Import Images, Back Up
 Metadata, Close Library. Edit: Select All, Archive/Restore Selected. View: Archive,
 Refresh Files, zoom. Existing crop/fit/masonry layouts and preview remain. No demo
-images are loaded. Tag/classifier tables are storage foundations, not new editing UIs.
+images are loaded. The Tags sidebar supports create, rename, reparent and delete; batch editing is available below the preview and in the Edit menu. Parent filters include descendants. All Images and Untagged exclude archived images. Tag deletion promotes children and removes only the deleted tag assignments. Classifier integration remains future work.
