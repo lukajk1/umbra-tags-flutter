@@ -10,10 +10,15 @@ import 'package:window_manager/window_manager.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
+import 'package:url_launcher/url_launcher.dart';
 import 'storage/library_store.dart';
 import 'storage/tag_repository.dart';
 import 'widgets/tag_widgets.dart';
 import 'receiver_server.dart';
+import 'ml/classifier.dart';
+import 'widgets/ml_settings_dialog.dart';
+import 'widgets/preview_details.dart';
+import 'widgets/gallery_drop_target.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -212,6 +217,141 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   final Map<String, Map<String, String>> _knownLibraries = {};
   ReceiverServer? _receiver;
   String _receiverStatus = 'Web receiver starting';
+  MlSettings _mlSettings = const MlSettings();
+  ImageClassifier? _classifier;
+  bool _classifying = false;
+  bool _cancelClassification = false;
+
+  ImageClassifier get _imageClassifier => _classifier ??= PythonImageClassifier(
+    home: _mlSettings.home,
+    python: _mlSettings.python,
+  );
+
+  void _configureMl() => _run(() async {
+    final settings = await showDialog<MlSettings>(
+      context: context,
+      builder: (_) => MlSettingsDialog(settings: _mlSettings),
+    );
+    if (settings == null) return;
+    await _classifier?.dispose();
+    _classifier = null;
+    _mlSettings = settings;
+    _persistSession();
+  });
+
+  void _classifySelection() => _run(() async {
+    final selected = _selection;
+    final library = _library;
+    if (selected.isEmpty || library == null) return;
+    _cancelClassification = false;
+    setState(() {
+      _classifying = true;
+      _status = 'Loading ML classifier…';
+    });
+    final details = <({String filename, String result})>[];
+    var tagged = 0, predicted = 0, failed = 0;
+    try {
+      final classifier = _imageClassifier;
+      await classifier.loadModel(_mlSettings.modelId);
+      for (var index = 0; index < selected.length; index++) {
+        if (_cancelClassification || !mounted) break;
+        final asset = selected[index];
+        setState(
+          () => _status =
+              'ML classify ${index + 1} of ${selected.length}: ${asset.originalFilename}',
+        );
+        try {
+          final result = await classifier.classify(
+            assetId: asset.id,
+            imagePath: library.absolutePath(asset.relativePath),
+            contentHash: asset.contentHash,
+            modelId: _mlSettings.modelId,
+          );
+          if (result.assetId != asset.id ||
+              result.contentHash != asset.contentHash) {
+            throw StateError(
+              'Classifier returned a result for a different image.',
+            );
+          }
+          final tags = await library.applyClassification(
+            assetId: result.assetId,
+            contentHash: result.contentHash,
+            modelId: result.modelId,
+            modelVersion: result.modelVersion,
+            scores: result.scores,
+            threshold: _mlSettings.threshold,
+            assignTags: _mlSettings.assignTags,
+          );
+          predicted++;
+          if (tags.isNotEmpty) tagged++;
+          final scores = result.scores.toList()
+            ..sort(
+              (a, b) =>
+                  (b['confidence'] as num).compareTo(a['confidence'] as num),
+            );
+          final best = scores.first;
+          details.add((
+            filename: asset.originalFilename,
+            result:
+                '${best['label']} · ${((best['confidence'] as num) * 100).toStringAsFixed(1)}% · ${tags.isEmpty ? 'prediction saved; no tag added' : 'tag assigned'}',
+          ));
+        } catch (error) {
+          failed++;
+          details.add((
+            filename: asset.originalFilename,
+            result: error.toString(),
+          ));
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _classifying = false);
+      await _reload();
+    }
+    if (!mounted) return;
+    final summary =
+        '$predicted classified · $tagged tagged · $failed failed${_cancelClassification ? ' · stopped' : ''}';
+    setState(() => _status = summary);
+    if (_closeRequested) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('ML classification'),
+        content: SizedBox(
+          width: 580,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(summary),
+              const SizedBox(height: 12),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 360),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: details.length,
+                  itemBuilder: (_, index) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(
+                      details[index].filename,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(details[index].result),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  });
 
   Future<T> _withWebLibrary<T>(
     String id,
@@ -344,6 +484,16 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
         }
       }
       _sessionRestored = true;
+      final ml = data['ml'];
+      if (ml is Map) {
+        _mlSettings = MlSettings(
+          home: ml['home'] is String ? ml['home'] as String : null,
+          python: ml['python'] is String ? ml['python'] as String : null,
+          modelId: ml['modelId'] is String ? ml['modelId'] as String : null,
+          threshold: _settingNumber(ml['threshold'], 0.8, 0, 1),
+          assignTags: ml['assignTags'] != false,
+        );
+      }
       if (!Platform.isMacOS && data['webLibraries'] is List) {
         for (final entry in data['webLibraries'] as List) {
           if (entry is Map &&
@@ -382,6 +532,13 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       'tileSize': _tileSize,
       'previewWidth': _previewWidth,
       'layout': _layout.name,
+      'ml': {
+        'home': _mlSettings.home,
+        'python': _mlSettings.python,
+        'modelId': _mlSettings.modelId,
+        'threshold': _mlSettings.threshold,
+        'assignTags': _mlSettings.assignTags,
+      },
       'previewVisible': _previewVisible,
       'scrollPositions': Map<String, double>.from(_scrollPositions),
       'lastLibraryPath': _lastLibraryPath,
@@ -558,6 +715,12 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
         ),
       ],
     );
+    await _importImageFiles(files);
+  });
+
+  Future<void> _importImageFiles(List<XFile> files) async {
+    final library = _library;
+    if (library == null || files.isEmpty) return;
     var added = 0;
     var duplicates = 0;
     final errors = <String>[];
@@ -587,7 +750,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       );
     }
     if (errors.isNotEmpty) throw LibraryException(errors.join('\n'));
-  });
+  }
 
   void _setFilter(LibraryView view, [String? tag]) => _run(() async {
     _rememberScrollPosition();
@@ -753,6 +916,25 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       _galleryFocus.requestFocus();
     }
   });
+  void _openPreviewExternally() {
+    if (_selectedPaths.isNotEmpty) _openImageExternally(_selectedPaths.first);
+  }
+
+  void _openImageExternally(String path) => _run(() async {
+    if (_library == null) return;
+    final asset = _assetsByPath[path];
+    if (asset == null) return;
+    final file = File(_library!.absolutePath(asset.relativePath));
+    if (!await file.exists()) {
+      throw LibraryException('This image file is missing from the library.');
+    }
+    if (!await launchUrl(file.uri, mode: LaunchMode.externalApplication)) {
+      throw LibraryException(
+        'Could not open this image. Choose a default app for its file type in your system settings.',
+      );
+    }
+  });
+
   void _archiveSelection() => _run(() async {
     await _library!.archive(
       _selectedPaths.map((path) => _assetsByPath[path]!.id).toList(),
@@ -777,6 +959,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   @override
   void onWindowClose() async {
     _closeRequested = true;
+    _cancelClassification = true;
     if (_busy || _closingWindow) return;
     _closingWindow = true;
     _rememberScrollPosition();
@@ -784,6 +967,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     _writeSession();
     await _sessionWrite;
     await _receiver?.close();
+    await _classifier?.dispose();
     await _library?.close();
     await windowManager.destroy();
   }
@@ -805,6 +989,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     _writeSession();
     windowManager.removeListener(this);
     unawaited(_receiver?.close() ?? Future<void>.value());
+    unawaited(_classifier?.dispose() ?? Future<void>.value());
     unawaited(_library?.close() ?? Future<void>.value());
     _scrollController.dispose();
     _galleryFocus.dispose();
@@ -899,6 +1084,16 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                       ? null
                       : _editSelectionTags,
                   child: const Text('Edit tags…'),
+                ),
+                MenuItemButton(
+                  onPressed: _busy || _selectedPaths.isEmpty
+                      ? null
+                      : _classifySelection,
+                  child: const Text('ML classify'),
+                ),
+                MenuItemButton(
+                  onPressed: _busy ? null : _configureMl,
+                  child: const Text('ML settings…'),
                 ),
                 MenuItemButton(
                   onPressed: _busy || _selectedPaths.isEmpty
@@ -1051,6 +1246,15 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
             ),
             if (_selectedPaths.isNotEmpty)
               Text('${_selectedPaths.length} selected  '),
+            if (_classifying)
+              TextButton(
+                onPressed: _cancelClassification
+                    ? null
+                    : () => setState(() => _cancelClassification = true),
+                child: Text(
+                  _cancelClassification ? 'Stopping…' : 'Cancel after image',
+                ),
+              ),
             if (widget.startReceiver)
               Tooltip(
                 message: _receiverStatus,
@@ -1130,154 +1334,182 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                 ),
                 const VerticalDivider(width: 1),
                 Expanded(
-                  child: LayoutBuilder(
-                    builder: (context, constraints) {
-                      _onLayoutWidth(constraints.maxWidth);
-                      final width = _committedWidth > 0
-                          ? _committedWidth
-                          : constraints.maxWidth;
-                      final cols = _columnCount(width);
+                  child: GalleryDropTarget(
+                    enabled: !_busy && !_closingWindow,
+                    onFiles: (files) => _run(() => _importImageFiles(files)),
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        _onLayoutWidth(constraints.maxWidth);
+                        final width = _committedWidth > 0
+                            ? _committedWidth
+                            : constraints.maxWidth;
+                        final cols = _columnCount(width);
 
-                      if (_assets.isEmpty) {
-                        return Center(
-                          child: Text(
-                            _showArchived
-                                ? 'No archived images'
-                                : _tagFilter != null || _untagged
-                                ? 'No images match this filter'
-                                : 'Import images to fill this library',
-                            style: const TextStyle(color: Colors.white54),
-                          ),
-                        );
-                      }
-                      Widget grid;
-                      if (_pendingScrollOffset != null) {
-                        WidgetsBinding.instance.addPostFrameCallback(
-                          (_) => _restoreScrollPosition(),
-                        );
-                      }
-                      if (_layout == LayoutMode.masonry) {
-                        grid = MasonryGridView.builder(
-                          key: _gridKey,
-                          controller: _scrollController,
-                          gridDelegate:
-                              SliverSimpleGridDelegateWithFixedCrossAxisCount(
-                                crossAxisCount: cols,
-                              ),
-                          mainAxisSpacing: 8,
-                          crossAxisSpacing: 8,
-                          itemCount: _imagePaths.length,
-                          itemBuilder: (context, index) => GalleryTile(
-                            key: _tileKeys[_imagePaths[index]],
-                            path: _imagePaths[index],
-                            thumbnail: _thumbnailFor(_imagePaths[index]),
-                            aspectRatio:
-                                _assets[index].width / _assets[index].height,
-                            filename: _assets[index].originalFilename,
-                            tileSize: _tileSize,
-                            layout: _layout,
-                            selected: _selectedPaths.contains(
-                              _imagePaths[index],
+                        if (_assets.isEmpty) {
+                          return Center(
+                            child: Text(
+                              _showArchived
+                                  ? 'No archived images'
+                                  : _tagFilter != null || _untagged
+                                  ? 'No images match this filter'
+                                  : 'Import images to fill this library',
+                              style: const TextStyle(color: Colors.white54),
                             ),
-                            onTap: () => _selectImage(_imagePaths[index]),
-                            onContextSelect: () =>
-                                _selectContextImage(_imagePaths[index]),
-                            onDelete: _busy ? null : _deleteSelection,
-                          ),
-                        );
-                      } else {
-                        grid = GridView.builder(
-                          key: _gridKey,
-                          controller: _scrollController,
-                          itemCount: _imagePaths.length,
-                          gridDelegate:
-                              SliverGridDelegateWithMaxCrossAxisExtent(
-                                maxCrossAxisExtent: _tileSize,
-                                mainAxisSpacing: 8,
-                                crossAxisSpacing: 8,
+                          );
+                        }
+                        Widget grid;
+                        if (_pendingScrollOffset != null) {
+                          WidgetsBinding.instance.addPostFrameCallback(
+                            (_) => _restoreScrollPosition(),
+                          );
+                        }
+                        if (_layout == LayoutMode.masonry) {
+                          grid = MasonryGridView.builder(
+                            key: _gridKey,
+                            controller: _scrollController,
+                            gridDelegate:
+                                SliverSimpleGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: cols,
+                                ),
+                            mainAxisSpacing: 8,
+                            crossAxisSpacing: 8,
+                            itemCount: _imagePaths.length,
+                            itemBuilder: (context, index) => GalleryTile(
+                              key: _tileKeys[_imagePaths[index]],
+                              path: _imagePaths[index],
+                              thumbnail: _thumbnailFor(_imagePaths[index]),
+                              aspectRatio:
+                                  _assets[index].width / _assets[index].height,
+                              filename: _assets[index].originalFilename,
+                              tileSize: _tileSize,
+                              layout: _layout,
+                              selected: _selectedPaths.contains(
+                                _imagePaths[index],
                               ),
-                          itemBuilder: (context, index) => GalleryTile(
-                            key: _tileKeys[_imagePaths[index]],
-                            path: _imagePaths[index],
-                            thumbnail: _thumbnailFor(_imagePaths[index]),
-                            aspectRatio:
-                                _assets[index].width / _assets[index].height,
-                            filename: _assets[index].originalFilename,
-                            tileSize: _tileSize,
-                            layout: _layout,
-                            selected: _selectedPaths.contains(
-                              _imagePaths[index],
+                              onTap: () => _selectImage(_imagePaths[index]),
+                              onDoubleTap: _busy
+                                  ? null
+                                  : () => _openImageExternally(
+                                      _imagePaths[index],
+                                    ),
+                              onContextSelect: () =>
+                                  _selectContextImage(_imagePaths[index]),
+                              onDelete: _busy ? null : _deleteSelection,
+                              onClassify: _busy ? null : _classifySelection,
                             ),
-                            onTap: () => _selectImage(_imagePaths[index]),
-                            onContextSelect: () =>
-                                _selectContextImage(_imagePaths[index]),
-                            onDelete: _busy ? null : _deleteSelection,
-                          ),
-                        );
-                      }
+                          );
+                        } else {
+                          grid = GridView.builder(
+                            key: _gridKey,
+                            controller: _scrollController,
+                            itemCount: _imagePaths.length,
+                            gridDelegate:
+                                SliverGridDelegateWithMaxCrossAxisExtent(
+                                  maxCrossAxisExtent: _tileSize,
+                                  mainAxisSpacing: 8,
+                                  crossAxisSpacing: 8,
+                                ),
+                            itemBuilder: (context, index) => GalleryTile(
+                              key: _tileKeys[_imagePaths[index]],
+                              path: _imagePaths[index],
+                              thumbnail: _thumbnailFor(_imagePaths[index]),
+                              aspectRatio:
+                                  _assets[index].width / _assets[index].height,
+                              filename: _assets[index].originalFilename,
+                              tileSize: _tileSize,
+                              layout: _layout,
+                              selected: _selectedPaths.contains(
+                                _imagePaths[index],
+                              ),
+                              onTap: () => _selectImage(_imagePaths[index]),
+                              onDoubleTap: _busy
+                                  ? null
+                                  : () => _openImageExternally(
+                                      _imagePaths[index],
+                                    ),
+                              onContextSelect: () =>
+                                  _selectContextImage(_imagePaths[index]),
+                              onDelete: _busy ? null : _deleteSelection,
+                              onClassify: _busy ? null : _classifySelection,
+                            ),
+                          );
+                        }
 
-                      return Focus(
-                        focusNode: _galleryFocus,
-                        onKeyEvent: (node, event) {
-                          if (event is KeyDownEvent &&
-                              event.logicalKey == LogicalKeyboardKey.delete &&
-                              !_busy &&
-                              _selectedPaths.isNotEmpty) {
-                            _deleteSelection();
-                            return KeyEventResult.handled;
-                          }
-                          return KeyEventResult.ignored;
-                        },
-                        child: Listener(
-                          onPointerDown: (e) {
-                            // Only start marquee on left button drag, not scroll wheel
-                            if (e.buttons == 1) {
-                              _galleryFocus.requestFocus();
-                              setState(() {
-                                _dragStart = e.localPosition;
-                                _dragCurrent = e.localPosition;
-                              });
+                        return Focus(
+                          focusNode: _galleryFocus,
+                          onKeyEvent: (node, event) {
+                            if (event is KeyDownEvent &&
+                                event.logicalKey == LogicalKeyboardKey.delete &&
+                                !_busy &&
+                                _selectedPaths.isNotEmpty) {
+                              _deleteSelection();
+                              return KeyEventResult.handled;
                             }
+                            return KeyEventResult.ignored;
                           },
-                          onPointerMove: (e) {
-                            if (_dragStart != null) {
-                              setState(() => _dragCurrent = e.localPosition);
-                              _updateMarqueeSelection();
-                            }
-                          },
-                          onPointerUp: (_) => setState(() {
-                            _dragStart = null;
-                            _dragCurrent = null;
-                          }),
                           child: ScrollConfiguration(
                             behavior: _GalleryScrollBehavior(),
                             child: Scrollbar(
                               controller: _scrollController,
+                              thumbVisibility: true,
+                              interactive: true,
+                              scrollbarOrientation: ScrollbarOrientation.right,
                               thickness: 8,
                               radius: const Radius.circular(4),
                               child: Padding(
-                                padding: const EdgeInsets.only(right: 12),
-                                child: Stack(
-                                  children: [
-                                    grid,
-                                    if (_selectionRect != null)
-                                      Positioned.fill(
-                                        child: IgnorePointer(
-                                          child: CustomPaint(
-                                            painter: _MarqueePainter(
-                                              _selectionRect!,
+                                padding: const EdgeInsets.only(right: 20),
+                                // Keep scrollbar drags outside selection hit testing.
+                                child: Listener(
+                                  onPointerDown: (e) {
+                                    // Only start marquee on left button drag, not scroll wheel
+                                    if (!_busy &&
+                                        e.kind == PointerDeviceKind.mouse &&
+                                        e.buttons == kPrimaryMouseButton) {
+                                      _galleryFocus.requestFocus();
+                                      setState(() {
+                                        _dragStart = e.localPosition;
+                                        _dragCurrent = e.localPosition;
+                                      });
+                                    }
+                                  },
+                                  onPointerMove: (e) {
+                                    if (_dragStart != null) {
+                                      setState(
+                                        () => _dragCurrent = e.localPosition,
+                                      );
+                                      _updateMarqueeSelection();
+                                    }
+                                  },
+                                  onPointerUp: (_) => setState(() {
+                                    _dragStart = null;
+                                    _dragCurrent = null;
+                                  }),
+                                  onPointerCancel: (_) => setState(() {
+                                    _dragStart = null;
+                                    _dragCurrent = null;
+                                  }),
+                                  child: Stack(
+                                    children: [
+                                      grid,
+                                      if (_selectionRect != null)
+                                        Positioned.fill(
+                                          child: IgnorePointer(
+                                            child: CustomPaint(
+                                              painter: _MarqueePainter(
+                                                _selectionRect!,
+                                              ),
                                             ),
                                           ),
                                         ),
-                                      ),
-                                  ],
+                                    ],
+                                  ),
                                 ),
                               ),
                             ),
                           ),
-                        ),
-                      );
-                    },
+                        );
+                      },
+                    ),
                   ),
                 ),
                 if (_previewVisible) ...[
@@ -1331,12 +1563,23 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                     ),
                             ),
                           ),
-                          if (_selectedPaths.isNotEmpty)
+                          if (_selectedPaths.isNotEmpty) ...[
+                            PreviewDetails(
+                              asset: _assetsByPath[_selectedPaths.first]!,
+                              selectionCount: _selectedPaths.length,
+                              onOpen:
+                                  _busy ||
+                                      _assetsByPath[_selectedPaths.first]!
+                                          .missing
+                                  ? null
+                                  : _openPreviewExternally,
+                            ),
                             SelectionTags(
                               tags: _tags,
                               assets: _selection,
                               onEdit: _busy ? null : _editSelectionTags,
                             ),
+                          ],
                         ],
                       ),
                     ),
@@ -1359,8 +1602,10 @@ class GalleryTile extends StatelessWidget {
     required this.layout,
     required this.selected,
     required this.onTap,
+    this.onDoubleTap,
     this.onContextSelect,
     this.onDelete,
+    this.onClassify,
   });
 
   final String path;
@@ -1371,7 +1616,7 @@ class GalleryTile extends StatelessWidget {
   final LayoutMode layout;
   final bool selected;
   final VoidCallback onTap;
-  final VoidCallback? onContextSelect, onDelete;
+  final VoidCallback? onDoubleTap, onContextSelect, onDelete, onClassify;
 
   @override
   Widget build(BuildContext context) {
@@ -1417,6 +1662,7 @@ class GalleryTile extends StatelessWidget {
     );
     return GestureDetector(
       onTap: onTap,
+      onDoubleTap: onDoubleTap,
       onSecondaryTapUp: (d) => _showContextMenu(context, d.globalPosition),
       child: Stack(
         fit: layout == LayoutMode.masonry ? StackFit.loose : StackFit.expand,
@@ -1452,6 +1698,11 @@ class GalleryTile extends StatelessWidget {
         const PopupMenuItem(value: 'copy', child: Text('Copy file path')),
         const PopupMenuItem(value: 'info', child: Text('Image info')),
         PopupMenuItem(
+          value: 'classify',
+          enabled: onClassify != null,
+          child: const Text('ML classify'),
+        ),
+        PopupMenuItem(
           value: 'delete',
           enabled: onDelete != null,
           child: const Text('Delete'),
@@ -1460,6 +1711,7 @@ class GalleryTile extends StatelessWidget {
     );
     if (choice == 'copy') await Clipboard.setData(ClipboardData(text: path));
     if (choice == 'delete' && context.mounted) onDelete?.call();
+    if (choice == 'classify' && context.mounted) onClassify?.call();
     if (choice == 'info' && context.mounted) {
       await showDialog<void>(
         context: context,

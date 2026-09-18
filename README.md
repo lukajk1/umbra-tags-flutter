@@ -48,12 +48,12 @@ database. Only one cooperating application may edit a library at once.
 
 This is the new library/storage foundation, not a complete port of WinForms. The
 app supports nested tags, batch assignment, and tag-based filtering. Tag groups and
-classifier integration are future work; their storage tables already exist. Legacy save conversion is intentionally deferred.
+advanced classifier workflows are future work. Local ML classification is available through the gallery context menu. Legacy save conversion is intentionally deferred.
 The desktop app starts `lib/receiver_server.dart` automatically on IPv4 loopback port 8934.
-The Chrome extension in `../web-beam` selects a library, tags and an optional longest-edge
+The Chrome extension in `../umbra-tags-extension` selects a library, tags and an optional longest-edge
 size limit. Open each destination library in the app at least once, then refresh the
 extension popup and save its destination. A browser icon in the status bar reports
-receiver availability; hover for details. See `../web-beam/README.md` for setup and the protocol.
+receiver availability; hover for details. See `../umbra-tags-extension/README.md` for setup and the protocol.
 The current import flow supports JPEG, PNG, GIF, WebP and BMP, not videos.
 
 Tests cover moving libraries, duplicate imports, archival, missing media restoration,
@@ -61,7 +61,22 @@ cache regeneration, backups, schema rejection, interrupted-import recovery, and 
 create/import/preview/close/reopen UI flow. A widget-test screenshot is written to
 `build/portable-library-ui.png` (Flutter's test font is intentionally non-production).
 
-## Tagging
+## ML classification
+
+Right-click an image or selected batch and choose **ML classify**. The app starts
+the local Python worker from the sibling `umbra-tags-ml` project and defaults to
+the newer `best_model.pth` artwork/photos classifier. **Edit → ML settings** switches
+models and configures the confidence threshold (80% by default), automatic tagging,
+ML folder and Python executable. All settings persist between sessions.
+
+Prediction scores and model/image hashes are saved separately from assigned tags.
+Confident results create/reuse a named tag and assign it; existing tags are kept.
+`LibraryStore.tagAssetsByName`, `applyClassification` and `predictions` expose the
+same operations to code. Inference implements the replaceable `ImageClassifier`
+interface; Python architectures are selected through `umbra-tags-ml/models.json`.
+See `../umbra-tags-ml/README.md` for setup, the adapter protocol and code examples.
+
+## Tagging and deletion
 
 Select a gallery image and press **Delete**, or right-click it and choose **Delete**,
 to permanently remove its library copy, thumbnail and metadata. Multiple selected

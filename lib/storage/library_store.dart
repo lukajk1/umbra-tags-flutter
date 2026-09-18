@@ -12,6 +12,7 @@ import 'package:uuid/uuid.dart';
 
 import 'schema.dart';
 import 'tag_repository.dart';
+import 'classification_repository.dart';
 
 class LibraryException implements Exception {
   LibraryException(this.message);
@@ -27,6 +28,12 @@ class LibraryAsset {
       originalFilename = row['original_filename'] as String,
       width = row['width'] as int,
       height = row['height'] as int,
+      importedAt = row['imported_at'] is int
+          ? DateTime.fromMillisecondsSinceEpoch(
+              row['imported_at'] as int,
+              isUtc: true,
+            ).toLocal()
+          : null,
       contentHash = row['sha256'] as String,
       missing = row['missing'] == 1,
       archived = row['archived'] == 1,
@@ -36,6 +43,7 @@ class LibraryAsset {
 
   final String id, relativePath, originalFilename, contentHash;
   final int width, height;
+  final DateTime? importedAt;
   final bool missing, archived;
   final List<String> tagIds;
   String get thumbnailRelativePath =>
@@ -205,6 +213,43 @@ class LibraryStore {
   }) async {
     await _call('editTags', {'assets': assetIds, 'add': add, 'remove': remove});
   }
+
+  /// Creates missing named tags and assigns them atomically; safe for scripts
+  /// and classifier integrations. Existing assignments are never removed.
+  Future<List<String>> tagAssetsByName(
+    List<String> assetIds,
+    List<String> names,
+  ) async =>
+      (await _call('tagByName', {'assetIds': assetIds, 'names': names}) as List)
+          .cast<String>();
+
+  /// Saves all scores separately from confirmed tags and optionally assigns
+  /// the best label when its confidence meets the policy supplied by the caller.
+  Future<List<String>> applyClassification({
+    required String assetId,
+    required String contentHash,
+    required String modelId,
+    required String modelVersion,
+    required List<Map<String, Object?>> scores,
+    double threshold = 0.8,
+    bool assignTags = true,
+  }) async =>
+      (await _call('classification', {
+                'assetId': assetId,
+                'contentHash': contentHash,
+                'modelId': modelId,
+                'modelVersion': modelVersion,
+                'scores': scores,
+                'threshold': threshold,
+                'assignTags': assignTags,
+              })
+              as List)
+          .cast<String>();
+
+  Future<List<Map<String, Object?>>> predictions(String assetId) async =>
+      (await _call('predictions', assetId) as List)
+          .map((row) => Map<String, Object?>.from(row as Map))
+          .toList();
 
   Future<void> close() => _closing ??= _close();
 
@@ -388,6 +433,22 @@ class _LibraryEngine {
     switch (method) {
       case 'assets':
         return TagRepository(db).assets(args as Map);
+      case 'tagByName':
+        final values = args as Map;
+        return ClassificationRepository(db).tagAssets(
+          (values['assetIds'] as List).cast<String>(),
+          (values['names'] as List).cast<String>(),
+        );
+      case 'classification':
+        return ClassificationRepository(db).apply(args as Map);
+      case 'predictions':
+        return db
+            .select(
+              'SELECT * FROM predictions WHERE asset_id = ? ORDER BY created_at DESC,confidence DESC',
+              [args as String],
+            )
+            .map((row) => Map<String, Object?>.from(row))
+            .toList();
       case 'tags':
         return TagRepository(db).tags();
       case 'saveTag':

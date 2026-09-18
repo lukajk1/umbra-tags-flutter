@@ -44,7 +44,9 @@ versions are rejected without migration. The manifest ID must match the sole lib
   parent IDs; children and depth are derived. Tag operations
   prevent multi-node cycles. SQLite NOCASE uniqueness is ASCII case insensitive.
 * `predictions`: model/version, label, confidence, analyzed content hash, and date.
-  Suggestions are separate from confirmed tags. No classifier is invoked yet.
+  Suggestions are separate from confirmed tags. Local classifiers save all scores,
+  recording the checkpoint SHA-256 as the model version. The optional best-label
+  assignment uses a configurable threshold and commits with the predictions.
 * `jobs`: reserved durable job status/progress/errors. Running jobs become interrupted
   on reopen. Imports currently use their filesystem journal rather than this table.
 
@@ -118,4 +120,4 @@ user-selected read/write file access.
 File: New Library (choose an empty folder), Open Library, Import Images, Back Up
 Metadata, Close Library. Edit: Select All, Archive/Restore Selected. View: Archive,
 Refresh Files, zoom. Existing crop/fit/masonry layouts and preview remain. No demo
-images are loaded. The Tags sidebar supports create, rename, reparent and delete; batch editing is available below the preview and in the Edit menu. Parent filters include descendants. All Images and Untagged exclude archived images. Tag deletion promotes children and removes only the deleted tag assignments. Classifier integration remains future work.
+images are loaded. The Tags sidebar supports create, rename, reparent and delete; batch editing is available below the preview and in the Edit menu. Parent filters include descendants. All Images and Untagged exclude archived images. Tag deletion promotes children and removes only the deleted tag assignments. ML classify is available from the image context menu and Edit menu. The model backend is replaceable; predictions and optional named-tag assignments use the existing schema.
