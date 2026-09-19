@@ -14,6 +14,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'storage/library_store.dart';
 import 'storage/tag_repository.dart';
 import 'widgets/tag_widgets.dart';
+import 'widgets/tag_match_dialog.dart';
 import 'receiver_server.dart';
 import 'ml/classifier.dart';
 import 'ml/image_embedder.dart';
@@ -21,6 +22,7 @@ import 'ml/tag_suggester.dart';
 import 'ml/similarity_controller.dart';
 import 'widgets/similarity_widgets.dart';
 import 'widgets/ml_settings_dialog.dart';
+import 'widgets/options_dialog.dart';
 import 'widgets/preview_details.dart';
 import 'widgets/gallery_drop_target.dart';
 
@@ -66,7 +68,7 @@ Future<void> _saveSession(
 abstract final class AppColors {
   static const darker = Color(0xFF171717);
   static const lighter = Color(0xFF262622);
-  static const accent = Color(0xFF982820);
+  static const accent = Color(0xFFB5372D);
 }
 
 enum LayoutMode { crop, letterbox, masonry }
@@ -97,7 +99,7 @@ class GalleryApp extends StatelessWidget {
         sliderTheme: const SliderThemeData(
           activeTrackColor: AppColors.accent,
           thumbColor: AppColors.accent,
-          overlayColor: Color(0x29982820),
+          overlayColor: Color(0x29B5372D),
         ),
         segmentedButtonTheme: SegmentedButtonThemeData(
           style: ButtonStyle(
@@ -222,7 +224,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   ReceiverServer? _receiver;
   String _receiverStatus = 'Web receiver starting';
   MlSettings _mlSettings = const MlSettings();
-  bool _preloadMlOnLaunch = false;
+  final Set<String> _startupModels = {};
+  bool _reopenLastLibrary = true;
+  bool _receiverEnabled = true;
+  int _receiverPort = kPort;
   bool _warmingModels = false;
   ImageEmbedder? _standbyEmbedder;
   final Map<String, String> _modelStartupStatus = {
@@ -231,7 +236,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     'Tag suggestion text encoder': 'On demand',
   };
 
-  Future<void> _warmModels() async {
+  Future<void> _warmModels([Set<String>? selectedModels]) async {
+    final selected = Set<String>.from(selectedModels ?? _startupModels);
     if (_warmingModels || !mounted || _closingWindow) return;
     setState(() => _warmingModels = true);
     final loaders = <String, Future<void> Function()>{
@@ -253,8 +259,12 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     };
     try {
       for (final entry in loaders.entries) {
+        if (!selected.any((id) => startupModels[id] == entry.key)) continue;
         if (!mounted || _closingWindow) return;
-        setState(() => _modelStartupStatus[entry.key] = 'Loading…');
+        setState(() {
+          _modelStartupStatus[entry.key] = 'Loading…';
+          _status = 'Loading ${entry.key}…';
+        });
         try {
           await entry.value();
           if (mounted && !_closingWindow) {
@@ -267,7 +277,19 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
         }
       }
     } finally {
-      if (mounted) setState(() => _warmingModels = false);
+      if (mounted) {
+        setState(() {
+          _warmingModels = false;
+          final failures = selected
+              .map((id) => _modelStartupStatus[startupModels[id]])
+              .whereType<String>()
+              .where((status) => status.startsWith('Failed:'))
+              .toList();
+          _status = failures.isEmpty
+              ? 'Selected ML models loaded'
+              : failures.first;
+        });
+      }
     }
   }
 
@@ -278,11 +300,16 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     python: _mlSettings.python,
   );
 
-  Future<List<TagSuggestion>> _suggestTags(LibraryAsset asset) async {
+  Future<List<TagSuggestion>> _suggestTags(
+    LibraryAsset asset, {
+    String? matchingTag,
+  }) async {
     final library = _library!;
     final backend = _suggestionBackend;
     final similarity = _similarity;
-    final candidates = _tags.map((tag) => tag.name).toList();
+    final candidates = matchingTag == null
+        ? _tags.map((tag) => tag.name).toList()
+        : [matchingTag];
     final model = await backend.info();
     if (!identical(library, _library)) throw StateError('Library changed.');
     List<double>? vector;
@@ -308,6 +335,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       asset: asset,
       imagePath: library.absolutePath(asset.relativePath),
       candidates: candidates,
+      includeDefaults: matchingTag == null,
       embeddingKey: key,
       vector: vector,
     );
@@ -360,24 +388,77 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     python: _mlSettings.python,
   );
 
-  void _configureMl() => _run(() async {
-    final settings = await showDialog<MlSettings>(
+  void _configureOptions() => _run(() async {
+    await showDialog<void>(
       context: context,
-      builder: (_) => MlSettingsDialog(settings: _mlSettings),
+      barrierDismissible: false,
+      builder: (_) => OptionsDialog(
+        options: AppOptions(
+          ml: _mlSettings,
+          preloadModels: Set.of(_startupModels),
+          reopenLastLibrary: _reopenLastLibrary,
+          receiverEnabled: _receiverEnabled,
+          receiverPort: _receiverPort,
+        ),
+        receiverStatus: _receiverStatus,
+        modelStatus: Map.of(_modelStartupStatus),
+        onSave: _applyOptions,
+      ),
     );
-    if (settings == null) return;
-    await _standbyEmbedder?.dispose();
-    _standbyEmbedder = null;
-    _modelStartupStatus.updateAll((key, value) => 'On demand');
-    await _tagSuggester?.dispose();
-    _tagSuggester = null;
-    await _classifier?.dispose();
-    _classifier = null;
-    _mlSettings = settings;
-    await _stopSimilarity();
-    _startSimilarity();
-    _persistSession();
   });
+
+  Future<void> _applyOptions(AppOptions options, bool loadNow) async {
+    // Bind a replacement before closing the current receiver so an occupied
+    // port leaves the working connection and saved options intact.
+    final restartReceiver =
+        options.receiverEnabled != _receiverEnabled ||
+        options.receiverPort != _receiverPort ||
+        (options.receiverEnabled && _receiver?.port == null);
+    if (restartReceiver && widget.startReceiver) {
+      ReceiverServer? replacement;
+      if (options.receiverEnabled) {
+        replacement = _createWebReceiver();
+        try {
+          await replacement.start(port: options.receiverPort);
+        } catch (_) {
+          await replacement.close();
+          rethrow;
+        }
+      }
+      await _receiver?.close();
+      _receiver = replacement;
+      _receiverStatus = replacement == null
+          ? 'Browser extension connection disabled'
+          : 'Web receiver ready · localhost:${options.receiverPort}';
+    }
+    final runtimeChanged =
+        options.ml.home != _mlSettings.home ||
+        options.ml.python != _mlSettings.python ||
+        options.ml.modelId != _mlSettings.modelId;
+    if (runtimeChanged) {
+      await _standbyEmbedder?.dispose();
+      _standbyEmbedder = null;
+      await _tagSuggester?.dispose();
+      _tagSuggester = null;
+      await _classifier?.dispose();
+      _classifier = null;
+      await _stopSimilarity();
+      _modelStartupStatus.updateAll((key, value) => 'On demand');
+    }
+    setState(() {
+      _mlSettings = options.ml;
+      _startupModels
+        ..clear()
+        ..addAll(options.preloadModels);
+      _reopenLastLibrary = options.reopenLastLibrary;
+      _receiverEnabled = options.receiverEnabled;
+      _receiverPort = options.receiverPort;
+    });
+    if (runtimeChanged) _startSimilarity();
+    _writeSession();
+    await _sessionWrite;
+    if (loadNow) unawaited(_warmModels(Set.of(_startupModels)));
+  }
 
   void _classifySelection() => _run(() async {
     final selected = _selection;
@@ -524,61 +605,68 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     }
   }
 
-  Future<void> _startWebReceiver() async {
-    if (!widget.startReceiver || !mounted || _closingWindow) return;
-    final receiver = ReceiverServer(
-      libraries: () async => _knownLibraries.entries
+  ReceiverServer _createWebReceiver() => ReceiverServer(
+    libraries: () async => _knownLibraries.entries
+        .map(
+          (entry) => <String, Object?>{
+            'id': entry.key,
+            'name': entry.value['name'],
+            'active': entry.key == _library?.id,
+          },
+        )
+        .toList(),
+    tags: (id) => _withWebLibrary(
+      id,
+      (store) async => (await store.tags())
           .map(
-            (entry) => <String, Object?>{
-              'id': entry.key,
-              'name': entry.value['name'],
-              'active': entry.key == _library?.id,
+            (tag) => <String, Object?>{
+              'id': tag.id,
+              'name': tag.name,
+              'parentId': tag.parentId,
             },
           )
           .toList(),
-      tags: (id) => _withWebLibrary(
-        id,
-        (store) async => (await store.tags())
-            .map(
-              (tag) => <String, Object?>{
-                'id': tag.id,
-                'name': tag.name,
-                'parentId': tag.parentId,
-              },
-            )
-            .toList(),
-      ),
-      capture: (capture) => _withWebLibrary(capture.libraryId, (store) async {
-        final result = await store.importCapture(
-          capture.bytes,
-          filename: capture.filename,
-          tagIds: capture.tagIds,
-          maxDimension: capture.maxDimension,
+    ),
+    capture: (capture) => _withWebLibrary(capture.libraryId, (store) async {
+      final result = await store.importCapture(
+        capture.bytes,
+        filename: capture.filename,
+        tagIds: capture.tagIds,
+        maxDimension: capture.maxDimension,
+      );
+      if (identical(store, _library)) await _reload();
+      if (mounted) {
+        setState(
+          () => _status =
+              '${result.duplicate ? 'Already in' : 'Received in'} ${store.name}: ${result.asset.originalFilename}',
         );
-        if (identical(store, _library)) await _reload();
-        if (mounted) {
-          setState(
-            () => _status =
-                '${result.duplicate ? 'Already in' : 'Received in'} ${store.name}: ${result.asset.originalFilename}',
-          );
-        }
-        return <String, Object?>{
-          'assetId': result.asset.id,
-          'duplicate': result.duplicate,
-          'libraryName': store.name,
-          'width': result.asset.width,
-          'height': result.asset.height,
-        };
-      }),
-    );
+      }
+      return <String, Object?>{
+        'assetId': result.asset.id,
+        'duplicate': result.duplicate,
+        'libraryName': store.name,
+        'width': result.asset.width,
+        'height': result.asset.height,
+      };
+    }),
+  );
+  Future<void> _startWebReceiver() async {
+    if (!widget.startReceiver || !mounted || _closingWindow) return;
+    if (!_receiverEnabled) {
+      setState(() => _receiverStatus = 'Browser extension connection disabled');
+      return;
+    }
+    final receiver = _createWebReceiver();
     _receiver = receiver;
     try {
-      await receiver.start();
+      await receiver.start(port: _receiverPort);
       if (!mounted || _closingWindow) {
         await receiver.close();
         return;
       }
-      setState(() => _receiverStatus = 'Web receiver ready · localhost:8934');
+      setState(
+        () => _receiverStatus = 'Web receiver ready · localhost:$_receiverPort',
+      );
     } catch (error) {
       if (mounted) {
         setState(() => _receiverStatus = 'Web receiver unavailable: $error');
@@ -623,7 +711,21 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
           }
         }
       }
-      _preloadMlOnLaunch = data['preloadMlOnLaunch'] == true;
+      final startup = data['startupModels'];
+      _startupModels.clear();
+      if (startup is List) {
+        _startupModels.addAll(
+          startup.whereType<String>().where(startupModels.containsKey),
+        );
+      } else if (data['preloadMlOnLaunch'] == true) {
+        _startupModels.addAll(startupModels.keys);
+      }
+      _reopenLastLibrary = data['reopenLastLibrary'] != false;
+      _receiverEnabled = data['receiverEnabled'] != false;
+      final port = data['receiverPort'];
+      _receiverPort = port is int && port >= 1024 && port <= 65535
+          ? port
+          : kPort;
       _sessionRestored = true;
       final ml = data['ml'];
       if (ml is Map) {
@@ -650,7 +752,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       }
     });
     // A sandboxed Mac must reselect the folder to grant access for this session.
-    if (!Platform.isMacOS &&
+    if (_reopenLastLibrary &&
+        !Platform.isMacOS &&
         _lastLibraryPath != null &&
         !_busy &&
         _library == null) {
@@ -659,7 +762,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       });
     }
     await _startWebReceiver();
-    if (_preloadMlOnLaunch && mounted && !_closingWindow) {
+    if (_startupModels.isNotEmpty && mounted && !_closingWindow) {
       unawaited(_warmModels());
     }
   }
@@ -673,7 +776,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   void _writeSession() {
     if (!_sessionRestored) return;
     final data = <String, dynamic>{
-      'preloadMlOnLaunch': _preloadMlOnLaunch,
+      'startupModels': _startupModels.toList(),
+      'reopenLastLibrary': _reopenLastLibrary,
+      'receiverEnabled': _receiverEnabled,
+      'receiverPort': _receiverPort,
       'tileSize': _tileSize,
       'previewWidth': _previewWidth,
       'layout': _layout.name,
@@ -976,6 +1082,76 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     await _reload();
   });
 
+  void _findTagMatches(LibraryTag tag) => _run(() async {
+    final library = _library;
+    if (library == null) return;
+    final assets = (await library.assets())
+        .where((asset) => !asset.missing && !asset.tagIds.contains(tag.id))
+        .toList();
+    final classifier = _imageClassifier;
+    final modelId = _mlSettings.modelId;
+    List<String> labels = [];
+    String? classifierError;
+    try {
+      labels = (await classifier.labels(modelId)).toSet().toList();
+    } catch (error) {
+      classifierError = error.toString();
+    }
+    if (!mounted || !identical(library, _library)) return;
+    await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => TagMatchDialog(
+        tagName: tag.name,
+        assets: assets,
+        classifierLabels: labels,
+        classifierError: classifierError,
+        classifierThreshold: _mlSettings.threshold,
+        thumbnail: library.thumbnail,
+        score: (asset, source, label) async {
+          if (!identical(library, _library)) {
+            throw StateError('Library changed.');
+          }
+          if (source == TagMatchSource.semantic) {
+            final suggestions = await _suggestTags(asset, matchingTag: label);
+            return suggestions
+                .firstWhere(
+                  (suggestion) =>
+                      suggestion.label.toLowerCase() == label.toLowerCase(),
+                  orElse: () => throw StateError(
+                    'The model did not return a score for this tag.',
+                  ),
+                )
+                .score;
+          }
+          final result = await classifier.classify(
+            assetId: asset.id,
+            imagePath: library.absolutePath(asset.relativePath),
+            contentHash: asset.contentHash,
+            modelId: modelId,
+          );
+          if (result.assetId != asset.id ||
+              result.contentHash != asset.contentHash) {
+            throw StateError('Classifier result does not match this image.');
+          }
+          final row = result.scores.firstWhere(
+            (row) => row['label'] == label,
+            orElse: () =>
+                throw StateError('The classifier does not support this label.'),
+          );
+          return (row['confidence'] as num).toDouble();
+        },
+        onApply: (selected) async {
+          if (!identical(library, _library)) {
+            throw StateError('Library changed.');
+          }
+          await library.applyReviewedTags(selected, [tag.id], [], {});
+        },
+      ),
+    );
+    await _reload();
+  });
+
   void _selectImage(String path) {
     if (_busy) return;
     _galleryFocus.requestFocus();
@@ -1241,53 +1417,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                   child: const Text('ML classify'),
                 ),
                 MenuItemButton(
-                  onPressed: _busy || _warmingModels ? null : _configureMl,
-                  child: const Text('ML settings…'),
-                ),
-                SubmenuButton(
-                  menuChildren: [
-                    CheckboxMenuButton(
-                      value: _preloadMlOnLaunch,
-                      onChanged: !_sessionRestored
-                          ? null
-                          : (value) {
-                              setState(
-                                () => _preloadMlOnLaunch = value ?? false,
-                              );
-                              _persistSession();
-                            },
-                      child: const Text('Load ML models on launch'),
-                    ),
-                    MenuItemButton(
-                      onPressed: _warmingModels || _busy
-                          ? null
-                          : () => unawaited(_warmModels()),
-                      child: Text(
-                        _warmingModels ? 'Loading models…' : 'Load models now',
-                      ),
-                    ),
-                    const Divider(),
-                    for (final entry in _modelStartupStatus.entries)
-                      MenuItemButton(
-                        child: Tooltip(
-                          message: '${entry.key}: ${entry.value}',
-                          child: SizedBox(
-                            width: 330,
-                            child: Text(
-                              '${entry.key}: ${entry.value}',
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ),
-                      ),
-                    const MenuItemButton(
-                      child: Text(
-                        'Indexing keeps its separate pause/resume setting.',
-                      ),
-                    ),
-                  ],
-                  child: const Text('Startup'),
+                  onPressed: _busy || _warmingModels || !_sessionRestored
+                      ? null
+                      : _configureOptions,
+                  child: const Text('Options…'),
                 ),
                 MenuItemButton(
                   onPressed: _busy || _selectedPaths.isEmpty
@@ -1526,6 +1659,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                   onCreate: (parent) => _editTag(parent: parent),
                   onEdit: (tag) => _editTag(tag: tag),
                   onDelete: _deleteTag,
+                  onFindMatches: _findTagMatches,
                 ),
                 const VerticalDivider(width: 1),
                 Expanded(
@@ -1589,6 +1723,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                     ),
                               onContextSelect: () =>
                                   _selectContextImage(_imagePaths[index]),
+                              onArchive: _busy ? null : _archiveSelection,
+                              archived: _showArchived,
                               onDelete: _busy ? null : _deleteSelection,
                               onClassify: _busy ? null : _classifySelection,
                               onSimilar: _busy
@@ -1627,6 +1763,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                     ),
                               onContextSelect: () =>
                                   _selectContextImage(_imagePaths[index]),
+                              onArchive: _busy ? null : _archiveSelection,
+                              archived: _showArchived,
                               onDelete: _busy ? null : _deleteSelection,
                               onClassify: _busy ? null : _classifySelection,
                               onSimilar: _busy
@@ -1805,6 +1943,8 @@ class GalleryTile extends StatelessWidget {
     required this.onTap,
     this.onDoubleTap,
     this.onContextSelect,
+    this.onArchive,
+    this.archived = false,
     this.onDelete,
     this.onClassify,
     this.onSimilar,
@@ -1816,10 +1956,11 @@ class GalleryTile extends StatelessWidget {
   final String filename;
   final double tileSize;
   final LayoutMode layout;
-  final bool selected;
+  final bool selected, archived;
   final VoidCallback onTap;
   final VoidCallback? onDoubleTap,
       onContextSelect,
+      onArchive,
       onDelete,
       onClassify,
       onSimilar;
@@ -1914,6 +2055,11 @@ class GalleryTile extends StatelessWidget {
           child: const Text('ML classify'),
         ),
         PopupMenuItem(
+          value: 'archive',
+          enabled: onArchive != null,
+          child: Text(archived ? 'Restore from archive' : 'Archive'),
+        ),
+        PopupMenuItem(
           value: 'delete',
           enabled: onDelete != null,
           child: const Text('Delete'),
@@ -1921,6 +2067,7 @@ class GalleryTile extends StatelessWidget {
       ],
     );
     if (choice == 'copy') await Clipboard.setData(ClipboardData(text: path));
+    if (choice == 'archive' && context.mounted) onArchive?.call();
     if (choice == 'delete' && context.mounted) onDelete?.call();
     if (choice == 'classify' && context.mounted) onClassify?.call();
     if (choice == 'similar' && context.mounted) onSimilar?.call();

@@ -37,6 +37,7 @@ class TagSidebar extends StatefulWidget {
     required this.onCreate,
     required this.onEdit,
     required this.onDelete,
+    this.onFindMatches,
   });
   final List<LibraryTag> tags;
   final LibraryView view;
@@ -46,6 +47,7 @@ class TagSidebar extends StatefulWidget {
   final ValueChanged<String> onSelect;
   final ValueChanged<String?> onCreate;
   final ValueChanged<LibraryTag> onEdit, onDelete;
+  final ValueChanged<LibraryTag>? onFindMatches;
   @override
   State<TagSidebar> createState() => _TagSidebarState();
 }
@@ -159,8 +161,16 @@ class _TagSidebarState extends State<TagSidebar> {
                               }
                               if (action == 'edit') widget.onEdit(row.tag);
                               if (action == 'delete') widget.onDelete(row.tag);
+                              if (action == 'match') {
+                                widget.onFindMatches?.call(row.tag);
+                              }
                             },
-                            itemBuilder: (_) => const [
+                            itemBuilder: (_) => [
+                              if (widget.onFindMatches != null)
+                                const PopupMenuItem(
+                                  value: 'match',
+                                  child: Text('Find matching images…'),
+                                ),
                               PopupMenuItem(
                                 value: 'child',
                                 child: Text('Add child tag'),

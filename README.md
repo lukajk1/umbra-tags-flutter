@@ -65,7 +65,7 @@ create/import/preview/close/reopen UI flow. A widget-test screenshot is written 
 
 Right-click an image or selected batch and choose **ML classify**. The app starts
 the local Python worker from the sibling `umbra-tags-ml` project and defaults to
-the newer `best_model.pth` artwork/photos classifier. **Edit → ML settings** switches
+the newer `best_model.pth` artwork/photos classifier. **Edit → Options → Machine learning** switches
 models and configures the confidence threshold (80% by default), automatic tagging,
 ML folder and Python executable. All settings persist between sessions.
 
@@ -146,3 +146,65 @@ image, and individual failures do not discard other results.
 The tagger adds the matching bundled SigLIP text encoder/tokenizer (~1.05 GiB).
 No runtime downloads occur. Rebuild the offline package to include the updated ML
 scripts, text model, tokenizer and SentencePiece dependency.
+
+
+## Options
+
+**Edit → Options…** opens Startup, Machine learning, and Browser extension tabs.
+Startup has independent checkboxes for the selected artwork/photo classifier,
+similarity image encoder and tag-suggestion text encoder, plus reopening the last
+library. Save changes for the next launch, or use Save and load selected now.
+Preloading does not change per-library indexing pause/resume. Unchecked models
+still load when their features need them. The old all-model startup preference
+migrates to the three individual checkboxes.
+
+Machine learning contains the classifier choice, ML folder, Python override,
+classification threshold and automatic assignment controls. Browser extension
+can disable/enable the local receiver or change its port (1024–65535; default 8934).
+Changing ports binds the replacement before closing the old server; a bind error
+keeps the old connection running. Match the port under Connection settings in the
+browser extension popup. Options are saved in the existing flutter-session.json.
+
+## Windows installer (side by side with WinForms)
+
+Run `powershell -ExecutionPolicy Bypass -File tool/build_installer.ps1` with Flutter
+on PATH and Inno Setup 6 installed. It builds the Windows release, creates the
+complete offline Python/model bundle, then compiles the installer into a new
+`dist/installer-<timestamp>` folder. No tests are run by this script.
+Use `-FlutterCommand C:\src\flutter\bin\flutter.bat` or `-IsccPath <path>` as needed.
+`-BundleDirectory <complete-package>` skips rebuilding/packaging; this must be a
+current package including the Visual C++ runtime DLLs. Version comes from pubspec.yaml.
+Keep the setup EXE and any accompanying BIN files together when distributing it.
+
+The installer is named **Umbra Tags (Flutter)** and uses its own permanent AppId
+(`7040E4F7-ABCB-4FE7-AAD9-DC602B72EA63`). It installs per user into
+`%LOCALAPPDATA%\Programs\Umbra Tags Flutter`, with separate Start menu and optional
+Desktop shortcuts. The window still says Umbra Tags. Later Flutter releases reuse
+this AppId; never replace it with the WinForms AppId. Existing WinForms installation,
+shortcuts, settings and libraries are not renamed, removed or converted.
+
+Uninstall removes installed program files and its own shortcuts, not AppData
+settings or external library folders. Keep libraries outside the application folder.
+The package includes app-local Visual C++ runtime DLLs from Visual Studio's x64
+redistributable directory, so setup does not require a .NET or Python installation.
+This is an unsigned Windows installer; macOS packaging remains separate.
+
+## Find images for a tag
+
+Open a tag's three-dot menu and choose **Find matching images…**. The scan considers
+all available, non-archived images in the current library that do not already have
+that exact tag, regardless of the current gallery filter. It defaults to the configured
+classifier when the tag name matches a label reported by that model (case-insensitive),
+and otherwise uses the text/image tag suggestion backend. You can switch the source
+and map any tag to an available classifier label explicitly.
+
+The classifier uses its configured confidence cutoff; semantic matching starts at
+rank score 0.15. These are separate cutoffs, not combined scores. Adjust the cutoff
+for the tag and review ranked thumbnails before pressing **Add images to tag**.
+Changing the cutoff reselects matches; individual checkboxes allow further review.
+Stop finishes the current image, preserving partial results for review. Errors appear
+per image, and scanning alone never assigns tags. Applying adds only the selected tag
+in one catalog transaction with asset hash checks. Existing tags are preserved.
+Semantic scoring reuses compatible stored image vectors and computes missing ones.
+Deploy the updated Python tag_worker.py alongside the Flutter build; older installers
+must be rebuilt to include this feature.

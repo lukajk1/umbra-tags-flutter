@@ -27,6 +27,7 @@ class ClassificationResult {
 abstract interface class ImageClassifier {
   Future<List<ClassifierModel>> models();
   Future<void> loadModel(String? modelId);
+  Future<List<String>> labels(String? modelId);
   Future<ClassificationResult> classify({
     required String assetId,
     required String imagePath,
@@ -88,7 +89,7 @@ class PythonImageClassifier implements ImageClassifier {
     final root = home ?? discoverHome();
     if (root == null) {
       throw StateError(
-        'ML folder not found. Choose umbra-tags-ml in Edit → ML settings.',
+        'ML folder not found. Choose umbra-tags-ml in Edit → Options → Machine learning.',
       );
     }
     final bundledPython = p.join(
@@ -249,6 +250,12 @@ class PythonImageClassifier implements ImageClassifier {
   @override
   Future<void> loadModel(String? modelId) async {
     await _request('load', {'modelId': modelId});
+  }
+
+  @override
+  Future<List<String>> labels(String? modelId) async {
+    final data = await _request('load', {'modelId': modelId});
+    return (data['labels'] as List).cast<String>();
   }
 
   @override

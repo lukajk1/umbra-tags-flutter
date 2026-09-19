@@ -25,6 +25,7 @@ abstract interface class TagSuggester {
     required LibraryAsset asset,
     required String imagePath,
     required List<String> candidates,
+    bool includeDefaults = true,
     String? embeddingKey,
     List<double>? vector,
   });
@@ -48,6 +49,7 @@ class PythonTagSuggester implements TagSuggester {
     required LibraryAsset asset,
     required String imagePath,
     required List<String> candidates,
+    bool includeDefaults = true,
     String? embeddingKey,
     List<double>? vector,
   }) async {
@@ -57,6 +59,7 @@ class PythonTagSuggester implements TagSuggester {
       'contentHash': asset.contentHash,
       'imagePath': imagePath,
       'candidates': candidates,
+      'includeDefaults': includeDefaults,
       'embeddingKey': embeddingKey,
       'vector': vector,
     });
