@@ -66,6 +66,8 @@ class LibraryStore {
   final Isolate _isolate;
   bool _closed = false;
   Future<void>? _closing;
+  Future<void> _thumbnailTail = Future.value();
+  bool _backgroundCancelled = false;
   static final Set<String> _openRoots = {};
   static const supportedExtensions = [
     'jpg',
@@ -177,8 +179,21 @@ class LibraryStore {
     );
   }
 
-  Future<String?> thumbnail(LibraryAsset asset) async =>
-      await _call('thumbnail', asset.id) as String?;
+  // Keep at most one thumbnail request in the catalog worker. The remaining
+  // requests can be cancelled without jumping ahead of any database writes.
+  Future<String?> thumbnail(LibraryAsset asset) {
+    final result = _thumbnailTail.then<String?>((_) async {
+      if (_backgroundCancelled || _closed || _closing != null) return null;
+      return await _call('thumbnail', asset.id) as String?;
+    });
+    _thumbnailTail = result.then<void>(
+      (_) {},
+      onError: (Object error, StackTrace stack) {},
+    );
+    return result;
+  }
+
+  void cancelBackgroundWork() => _backgroundCancelled = true;
   Future<void> refresh() async {
     await _call('refresh');
   }
@@ -273,6 +288,7 @@ class LibraryStore {
 
   Future<void> _close() async {
     if (_closed) return;
+    cancelBackgroundWork();
     try {
       await _call('close');
     } finally {
@@ -758,7 +774,9 @@ class _LibraryEngine {
           );
     target.parent.createSync(recursive: true);
     final temp = File('${target.path}.tmp');
-    temp.writeAsBytesSync(img.encodeJpg(resized, quality: 92), flush: true);
+    // This is a regenerable cache, not library metadata. Avoid forcing a disk
+    // flush (especially on cloud-backed folders) before the worker can close.
+    temp.writeAsBytesSync(img.encodeJpg(resized, quality: 92));
     temp.renameSync(target.path);
     return target.path;
   }

@@ -165,29 +165,53 @@ Changing ports binds the replacement before closing the old server; a bind error
 keeps the old connection running. Match the port under Connection settings in the
 browser extension popup. Options are saved in the existing flutter-session.json.
 
-## Windows installer (side by side with WinForms)
+## Windows installers and fast updates
 
-Run `powershell -ExecutionPolicy Bypass -File tool/build_installer.ps1` with Flutter
-on PATH and Inno Setup 6 installed. It builds the Windows release, creates the
-complete offline Python/model bundle, then compiles the installer into a new
-`dist/installer-<timestamp>` folder. No tests are run by this script.
-Use `-FlutterCommand C:\src\flutter\bin\flutter.bat` or `-IsccPath <path>` as needed.
-`-BundleDirectory <complete-package>` skips rebuilding/packaging; this must be a
-current package including the Visual C++ runtime DLLs. Version comes from pubspec.yaml.
-Keep the setup EXE and any accompanying BIN files together when distributing it.
+Run these commands from the Flutter project directory. Inno Setup 6 and Flutter
+must be installed; use `-FlutterCommand C:\src\flutter\bin\flutter.bat` if needed.
 
-The installer is named **Umbra Tags (Flutter)** and uses its own permanent AppId
-(`7040E4F7-ABCB-4FE7-AAD9-DC602B72EA63`). It installs per user into
-`%LOCALAPPDATA%\Programs\Umbra Tags Flutter`, with separate Start menu and optional
-Desktop shortcuts. The window still says Umbra Tags. Later Flutter releases reuse
-this AppId; never replace it with the WinForms AppId. Existing WinForms installation,
-shortcuts, settings and libraries are not renamed, removed or converted.
+```powershell
+# Routine release: build Flutter and package only app code/assets/backend scripts.
+powershell -ExecutionPolicy Bypass -File tool/build_installer.ps1
 
-Uninstall removes installed program files and its own shortcuts, not AppData
-settings or external library folders. Keep libraries outside the application folder.
-The package includes app-local Visual C++ runtime DLLs from Visual Studio's x64
-redistributable directory, so setup does not require a .NET or Python installation.
-This is an unsigned Windows installer; macOS packaging remains separate.
+# Reuse an already-built Release executable (only when it is up to date).
+powershell -ExecutionPolicy Bypass -File tool/build_installer.ps1 -SkipBuild
+
+# Occasional first-install/offline release, including Python and all model weights.
+powershell -ExecutionPolicy Bypass -File tool/build_installer.ps1 -Mode Full
+
+# Standalone ML pack: no Flutter build. Rebuild only when models/dependencies change.
+powershell -ExecutionPolicy Bypass -File tool/build_installer.ps1 -Mode Runtime
+```
+
+Outputs go to separate timestamped `dist/installer-<Mode>-<timestamp>` directories.
+App-only installers are single EXEs and do not copy, hash or compress model weights
+or Python packages. `-BundleDirectory <existing-bundle>` reuses a prepared bundle.
+No tests run in these scripts. `package_windows.ps1` still defaults to Full for
+portable distribution and also accepts `-Mode App` or `-Mode Runtime`.
+
+Existing full installations can immediately use app-only updates: their local ML
+files remain installed, while backend scripts are updated. There is no required
+redownload or migration. On a new machine, install the App installer and the Runtime
+pack, or use Full. Without a compatible runtime, the app still manages libraries
+and reports an actionable error when ML is requested.
+
+The standalone runtime installs independently under
+`%LOCALAPPDATA%\Umbra Tags\ML\<runtimeId>`, with its own uninstaller. The app
+prefers a compatible local runtime, then the shared versioned pack. Code stays with
+the app; only Python, dependencies, weights and licenses belong in the pack.
+`runtime-requirements.json` in the ML source declares the required runtime ID;
+`ml-runtime.json` identifies a packaged runtime. Bump the runtime ID when changing
+weights or dependencies, build the new pack, then build the app update. Runtime IDs
+are immutable compatibility versions; code-only changes do not need a new ID.
+The original unmarked full bundle is accepted as baseline runtime 1. Model bundles
+retain their existing integrity verification and embedding identities.
+Explicit ML home/Python settings and environment overrides remain available.
+
+The app keeps its Flutter AppId (`7040E4F7-ABCB-4FE7-AAD9-DC602B72EA63`), per-user
+installation folder and separate shortcuts. WinForms is untouched. App uninstall
+preserves external libraries, settings, and separately installed runtime packs.
+These installers are unsigned; retain accompanying BIN files for Full/Runtime.
 
 ## Find images for a tag
 
@@ -208,3 +232,17 @@ in one catalog transaction with asset hash checks. Existing tags are preserved.
 Semantic scoring reuses compatible stored image vectors and computes missing ones.
 Deploy the updated Python tag_worker.py alongside the Flutter build; older installers
 must be rebuilt to include this feature.
+
+## AI refinement within a tag hierarchy
+
+Right-click a tag in the left sidebar to open its existing management menu.
+Select gallery images, then right-click an image and choose **AI refine tags…**.
+The action appears when at least one available selected image has an explicitly
+assigned tag with children. Each eligible image is compared with the direct children
+of each of its assigned parent tags using the tag suggestion backend and cached
+image embeddings. It does not recursively descend through new recommendations.
+The review shows up to three ranked candidates per parent, preselecting the best
+new child at or above the adjustable cutoff (initially 0.15). Already assigned
+children remain visible, and existing parents/tags are preserved. You may select
+additional candidates manually. Apply commits accepted additions together; Cancel
+makes no tag changes. Missing images and images without qualifying parents are skipped.

@@ -46,13 +46,15 @@ class PythonImageClassifier implements ImageClassifier {
   int _nextId = 0;
   String _stderr = '';
   bool _disposed = false;
+  Future<void>? _disposing;
+  final _terminating = <Process, Future<void>>{};
 
   static String? discoverHome() {
     final override = Platform.environment['UMBRA_ML_HOME'];
     if (override != null && override.isNotEmpty) return override;
     for (final initial in [
-      Directory.current.path,
       p.dirname(Platform.resolvedExecutable),
+      Directory.current.path,
     ]) {
       var directory = initial;
       for (var i = 0; i < 12; i++) {
@@ -92,8 +94,50 @@ class PythonImageClassifier implements ImageClassifier {
         'ML folder not found. Choose umbra-tags-ml in Edit → Options → Machine learning.',
       );
     }
+    final requirementsFile = File(p.join(root, 'runtime-requirements.json'));
+    final requirements = requirementsFile.existsSync()
+        ? jsonDecode(requirementsFile.readAsStringSync())
+              as Map<String, dynamic>
+        : <String, dynamic>{'runtimeId': '1'};
+    final runtimeId = requirements['runtimeId'] as String;
+    if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(runtimeId)) {
+      throw StateError('Invalid ML runtime version.');
+    }
+    var assets = Platform.environment['UMBRA_ML_ASSETS'] ?? root;
+    final hasLocalRuntime =
+        Directory(p.join(root, 'python')).existsSync() ||
+        Directory(p.join(root, '.venv')).existsSync();
+    final developmentRuntime = Directory(p.join(root, '.venv')).existsSync();
+    final localMarker = File(p.join(root, 'ml-runtime.json'));
+    final localCompatible =
+        hasLocalRuntime &&
+        (localMarker.existsSync()
+            ? (jsonDecode(localMarker.readAsStringSync())
+                      as Map)['runtimeId'] ==
+                  runtimeId
+            : runtimeId == '1' || developmentRuntime);
+    if (Platform.environment['UMBRA_ML_ASSETS'] == null &&
+        !localCompatible &&
+        Platform.isWindows) {
+      final local = Platform.environment['LOCALAPPDATA'];
+      if (local != null) assets = p.join(local, 'Umbra Tags', 'ML', runtimeId);
+    }
+    final marker = File(p.join(assets, 'ml-runtime.json'));
+    if (marker.existsSync()) {
+      final installed =
+          jsonDecode(marker.readAsStringSync()) as Map<String, dynamic>;
+      if (installed['format'] != 1 || installed['runtimeId'] != runtimeId) {
+        throw StateError(
+          'Install Umbra Tags ML runtime pack $runtimeId to use this app version.',
+        );
+      }
+    } else if ((runtimeId != '1' && !developmentRuntime) || assets != root) {
+      throw StateError(
+        'ML runtime pack $runtimeId is missing. Install the ML pack or the full offline installer.',
+      );
+    }
     final bundledPython = p.join(
-      root,
+      assets,
       'python',
       Platform.isWindows ? 'python.exe' : 'bin/python',
     );
@@ -122,10 +166,11 @@ class PythonImageClassifier implements ImageClassifier {
         'PYTHONUTF8': '1',
         'HF_HUB_OFFLINE': '1',
         'TRANSFORMERS_OFFLINE': '1',
+        'UMBRA_ML_ASSETS': assets,
       },
     );
     if (_disposed) {
-      process.kill();
+      await _terminateProcess(process);
       return;
     }
     _process = process;
@@ -135,7 +180,7 @@ class PythonImageClassifier implements ImageClassifier {
         onError: (Object error) {
           if (identical(_process, process)) {
             _fail(error);
-            process.kill();
+            unawaited(_terminateProcess(process));
           }
         },
       ),
@@ -169,12 +214,12 @@ class PythonImageClassifier implements ImageClassifier {
               _pending.remove(reply['id']);
             } catch (error) {
               _fail(error);
-              process.kill();
+              unawaited(_terminateProcess(process));
             }
           },
           onError: (Object error) {
             _fail(error);
-            process.kill();
+            unawaited(_terminateProcess(process));
           },
         );
     unawaited(
@@ -214,7 +259,7 @@ class PythonImageClassifier implements ImageClassifier {
       final process = _process;
       _process = null;
       _fail(StateError('Classifier timed out.'));
-      process?.kill();
+      if (process != null) unawaited(_terminateProcess(process));
       throw StateError('Classifier timed out. Check the ML configuration.');
     } finally {
       _pending.remove(id);
@@ -273,18 +318,49 @@ class PythonImageClassifier implements ImageClassifier {
     }),
   );
   @override
-  Future<void> dispose() async {
+  Future<void> dispose() => _disposing ??= _dispose();
+
+  Future<void> _dispose() async {
     _disposed = true;
     _fail(StateError('Classifier stopped.'));
     final process = _process;
     _process = null;
     if (process != null) {
-      process.kill();
+      await _terminateProcess(process);
+    }
+    // A process may still be starting; _launch terminates it if disposed.
+    try {
+      await _starting;
+    } catch (_) {}
+  }
+
+  Future<void> _terminateProcess(Process process) =>
+      _terminating.putIfAbsent(process, () => _terminateTree(process));
+
+  Future<void> _terminateTree(Process process) async {
+    if (Platform.isWindows) {
+      // venv python.exe is a launcher on Windows. Kill its owned process tree
+      // before the launcher exits, otherwise the real interpreter is orphaned.
       try {
-        await process.exitCode.timeout(const Duration(seconds: 3));
-      } on TimeoutException {
-        process.kill(ProcessSignal.sigkill);
+        final result = await Process.run(
+          p.join(
+            Platform.environment['SystemRoot'] ?? r'C:\Windows',
+            'System32',
+            'taskkill.exe',
+          ),
+          ['/PID', '${process.pid}', '/T', '/F'],
+        ).timeout(const Duration(seconds: 3));
+        if (result.exitCode != 0) process.kill();
+      } catch (_) {
+        process.kill();
       }
+    } else {
+      process.kill();
+    }
+    try {
+      await process.exitCode.timeout(const Duration(seconds: 2));
+    } on TimeoutException {
+      process.kill(ProcessSignal.sigkill);
     }
   }
 }

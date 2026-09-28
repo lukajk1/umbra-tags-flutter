@@ -54,6 +54,21 @@ class TagSidebar extends StatefulWidget {
 
 class _TagSidebarState extends State<TagSidebar> {
   String _search = '';
+  void _tagAction(String action, LibraryTag tag) {
+    if (action == 'child') widget.onCreate(tag.id);
+    if (action == 'edit') widget.onEdit(tag);
+    if (action == 'delete') widget.onDelete(tag);
+    if (action == 'match') widget.onFindMatches?.call(tag);
+  }
+
+  List<PopupMenuEntry<String>> _menuItems() => [
+    if (widget.onFindMatches != null)
+      const PopupMenuItem(value: 'match', child: Text('Find matching images…')),
+    PopupMenuItem(value: 'child', child: Text('Add child tag')),
+    PopupMenuItem(value: 'edit', child: Text('Rename / move')),
+    PopupMenuItem(value: 'delete', child: Text('Delete tag')),
+  ];
+
   @override
   Widget build(BuildContext context) {
     final rows = tagTree(widget.tags)
@@ -131,59 +146,67 @@ class _TagSidebarState extends State<TagSidebar> {
                       itemCount: rows.length,
                       itemBuilder: (context, index) {
                         final row = rows[index];
-                        return ListTile(
-                          key: ValueKey('tag-filter-${row.tag.id}'),
-                          dense: true,
-                          contentPadding: EdgeInsets.only(
-                            left: 12 + (row.depth * 12).clamp(0, 60).toDouble(),
-                          ),
-                          leading: const Icon(Icons.label_outline, size: 18),
-                          minLeadingWidth: 16,
-                          title: Tooltip(
-                            message: row.tag.name,
-                            child: Text(
-                              row.tag.name,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          selected: widget.selectedTag == row.tag.id,
-                          onTap: widget.busy
+                        return GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onSecondaryTapUp: widget.busy
                               ? null
-                              : () => widget.onSelect(row.tag.id),
-                          trailing: PopupMenuButton<String>(
-                            tooltip: 'Manage ${row.tag.name}',
-                            enabled: !widget.busy,
-                            icon: const Icon(Icons.more_vert, size: 18),
-                            onSelected: (action) {
-                              if (action == 'child') {
-                                widget.onCreate(row.tag.id);
-                              }
-                              if (action == 'edit') widget.onEdit(row.tag);
-                              if (action == 'delete') widget.onDelete(row.tag);
-                              if (action == 'match') {
-                                widget.onFindMatches?.call(row.tag);
-                              }
-                            },
-                            itemBuilder: (_) => [
-                              if (widget.onFindMatches != null)
-                                const PopupMenuItem(
-                                  value: 'match',
-                                  child: Text('Find matching images…'),
-                                ),
-                              PopupMenuItem(
-                                value: 'child',
-                                child: Text('Add child tag'),
+                              : (details) async {
+                                  final overlay =
+                                      Overlay.of(
+                                            context,
+                                          ).context.findRenderObject()
+                                          as RenderBox;
+                                  final position = overlay.globalToLocal(
+                                    details.globalPosition,
+                                  );
+                                  final action = await showMenu<String>(
+                                    context: context,
+                                    position: RelativeRect.fromRect(
+                                      Rect.fromLTWH(
+                                        position.dx,
+                                        position.dy,
+                                        0,
+                                        0,
+                                      ),
+                                      Offset.zero & overlay.size,
+                                    ),
+                                    items: _menuItems(),
+                                  );
+                                  if (mounted &&
+                                      !widget.busy &&
+                                      action != null) {
+                                    _tagAction(action, row.tag);
+                                  }
+                                },
+                          child: ListTile(
+                            key: ValueKey('tag-filter-${row.tag.id}'),
+                            dense: true,
+                            contentPadding: EdgeInsets.only(
+                              left:
+                                  12 + (row.depth * 12).clamp(0, 60).toDouble(),
+                            ),
+                            leading: const Icon(Icons.label_outline, size: 18),
+                            minLeadingWidth: 16,
+                            title: Tooltip(
+                              message: row.tag.name,
+                              child: Text(
+                                row.tag.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                               ),
-                              PopupMenuItem(
-                                value: 'edit',
-                                child: Text('Rename / move'),
-                              ),
-                              PopupMenuItem(
-                                value: 'delete',
-                                child: Text('Delete tag'),
-                              ),
-                            ],
+                            ),
+                            selected: widget.selectedTag == row.tag.id,
+                            onTap: widget.busy
+                                ? null
+                                : () => widget.onSelect(row.tag.id),
+                            trailing: PopupMenuButton<String>(
+                              tooltip: 'Manage ${row.tag.name}',
+                              enabled: !widget.busy,
+                              icon: const Icon(Icons.more_vert, size: 18),
+                              onSelected: (action) =>
+                                  _tagAction(action, row.tag),
+                              itemBuilder: (_) => _menuItems(),
+                            ),
                           ),
                         );
                       },

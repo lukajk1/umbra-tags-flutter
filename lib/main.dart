@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -10,11 +11,12 @@ import 'package:window_manager/window_manager.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
-import 'package:url_launcher/url_launcher.dart';
+import 'package:image/image.dart' as img;
 import 'storage/library_store.dart';
 import 'storage/tag_repository.dart';
 import 'widgets/tag_widgets.dart';
 import 'widgets/tag_match_dialog.dart';
+import 'widgets/hierarchy_dialog.dart';
 import 'receiver_server.dart';
 import 'ml/classifier.dart';
 import 'ml/image_embedder.dart';
@@ -160,6 +162,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   final Map<String, GlobalKey> _tileKeys = {};
   final Map<String, Future<String?>> _thumbnails = {};
   bool _busy = false;
+  Completer<void>? _operationIdle;
+  Future<void>? _applyingOptions;
   bool _closeRequested = false;
   bool _closingWindow = false;
   bool _showArchived = false;
@@ -303,13 +307,17 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   Future<List<TagSuggestion>> _suggestTags(
     LibraryAsset asset, {
     String? matchingTag,
+    List<String>? candidateLabels,
   }) async {
+    if (_closingWindow) throw StateError('Application is closing.');
     final library = _library!;
     final backend = _suggestionBackend;
     final similarity = _similarity;
-    final candidates = matchingTag == null
-        ? _tags.map((tag) => tag.name).toList()
-        : [matchingTag];
+    final candidates =
+        candidateLabels ??
+        (matchingTag == null
+            ? _tags.map((tag) => tag.name).toList()
+            : [matchingTag]);
     final model = await backend.info();
     if (!identical(library, _library)) throw StateError('Library changed.');
     List<double>? vector;
@@ -335,7 +343,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       asset: asset,
       imagePath: library.absolutePath(asset.relativePath),
       candidates: candidates,
-      includeDefaults: matchingTag == null,
+      includeDefaults: matchingTag == null && candidateLabels == null,
       embeddingKey: key,
       vector: vector,
     );
@@ -353,6 +361,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   }
 
   void _startSimilarity() {
+    if (_closingWindow) return;
     if (_library == null) return;
     final embedder =
         _standbyEmbedder ??
@@ -407,7 +416,15 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     );
   });
 
-  Future<void> _applyOptions(AppOptions options, bool loadNow) async {
+  Future<void> _applyOptions(AppOptions options, bool loadNow) {
+    if (_closingWindow) return Future.value();
+    return _applyingOptions ??= _applyOptionsNow(
+      options,
+      loadNow,
+    ).whenComplete(() => _applyingOptions = null);
+  }
+
+  Future<void> _applyOptionsNow(AppOptions options, bool loadNow) async {
     // Bind a replacement before closing the current receiver so an occupied
     // port leaves the working connection and saved options intact.
     final restartReceiver =
@@ -426,6 +443,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
         }
       }
       await _receiver?.close();
+      if (_closingWindow) {
+        await replacement?.close();
+        return;
+      }
       _receiver = replacement;
       _receiverStatus = replacement == null
           ? 'Browser extension connection disabled'
@@ -445,6 +466,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       await _stopSimilarity();
       _modelStartupStatus.updateAll((key, value) => 'On demand');
     }
+    if (_closingWindow || !mounted) return;
     setState(() {
       _mlSettings = options.ml;
       _startupModels
@@ -585,6 +607,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     if (entry == null) {
       throw ReceiverException(404, 'Open this library in Umbra Tags first.');
     }
+    _operationIdle = Completer<void>();
     setState(() => _busy = true);
     LibraryStore? store;
     try {
@@ -599,9 +622,13 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       }
       return await operation(store);
     } finally {
-      if (store != null && !identical(store, _library)) await store.close();
-      if (mounted) setState(() => _busy = false);
-      if (_closeRequested && mounted) onWindowClose();
+      try {
+        if (store != null && !identical(store, _library)) await store.close();
+      } finally {
+        if (mounted) setState(() => _busy = false);
+        _operationIdle?.complete();
+        _operationIdle = null;
+      }
     }
   }
 
@@ -768,7 +795,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   }
 
   void _persistSession() {
-    if (!_sessionRestored) return;
+    if (!_sessionRestored || _closingWindow) return;
     _sessionTimer?.cancel();
     _sessionTimer = Timer(const Duration(milliseconds: 350), _writeSession);
   }
@@ -803,11 +830,12 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
 
   Future<void> _run(Future<void> Function() operation) async {
     if (_busy || _closingWindow) return;
+    _operationIdle = Completer<void>();
     setState(() => _busy = true);
     try {
       await operation();
     } catch (error) {
-      if (mounted) {
+      if (mounted && !_closingWindow) {
         await showDialog<void>(
           context: context,
           builder: (context) => AlertDialog(
@@ -824,18 +852,23 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       }
     } finally {
       if (mounted) setState(() => _busy = false);
-      if (_closeRequested && mounted) onWindowClose();
+      _operationIdle?.complete();
+      _operationIdle = null;
     }
   }
 
   Future<void> _attach(LibraryStore library) async {
-    if (!mounted) {
+    if (!mounted || _closingWindow) {
       await library.close();
       return;
     }
     _rememberScrollPosition();
     await _stopSimilarity();
     await _library?.close();
+    if (_closingWindow || !mounted) {
+      await library.close();
+      return;
+    }
     _library = library;
     _startSimilarity();
     _lastLibraryPath = library.root;
@@ -850,6 +883,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   }
 
   Future<void> _reload() async {
+    if (_closingWindow) return;
     final tags = await _library!.tags();
     if (_tagFilter != null && !tags.any((tag) => tag.id == _tagFilter)) {
       _tagFilter = null;
@@ -893,7 +927,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     final folder = await getDirectoryPath(
       confirmButtonText: 'Use empty folder',
     );
-    if (folder == null || !mounted) return;
+    if (folder == null || !mounted || _closingWindow) return;
     final input = TextEditingController(text: p.basename(folder));
     final name = await showDialog<String>(
       context: context,
@@ -926,7 +960,9 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     // Wait until the closing dialog has detached its editable text.
     await Future<void>.delayed(const Duration(milliseconds: 250));
     input.dispose();
-    if (name != null) await _attach(await LibraryStore.create(folder, name));
+    if (name != null && !_closingWindow) {
+      await _attach(await LibraryStore.create(folder, name));
+    }
   });
 
   void _openLibrary() => _run(() async {
@@ -934,7 +970,9 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       initialDirectory: _lastLibraryPath,
       confirmButtonText: 'Open library',
     );
-    if (folder != null) await _attach(await LibraryStore.open(folder));
+    if (folder != null && !_closingWindow) {
+      await _attach(await LibraryStore.open(folder));
+    }
   });
 
   void _closeLibrary() => _run(() async {
@@ -979,6 +1017,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     var duplicates = 0;
     final errors = <String>[];
     for (var i = 0; i < files.length; i++) {
+      if (_closingWindow) break;
       if (mounted) {
         setState(() => _status = 'Importing ${i + 1} of ${files.length}…');
       }
@@ -1082,12 +1121,108 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     await _reload();
   });
 
+  bool _canRefineSelection() => _selection.any(
+    (asset) =>
+        !asset.missing &&
+        _tags.any((tag) => asset.tagIds.contains(tag.parentId)),
+  );
+
+  void _refineSelection() => _run(() async {
+    final library = _library;
+    if (library == null || _closingWindow) return;
+    final selected = _selection.toList();
+    final tags = List<LibraryTag>.of(_tags);
+    final children = <String, List<LibraryTag>>{};
+    for (final tag in tags) {
+      if (tag.parentId != null) {
+        children.putIfAbsent(tag.parentId!, () => []).add(tag);
+      }
+    }
+    final eligible = selected
+        .where(
+          (asset) => !asset.missing && asset.tagIds.any(children.containsKey),
+        )
+        .toList();
+    if (eligible.isEmpty) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => HierarchyDialog(
+        assets: eligible,
+        skipped: selected.length - eligible.length,
+        thumbnail: library.thumbnail,
+        find: (asset) async {
+          final matches = <HierarchyMatch>[];
+          for (final parent in tags.where(
+            (tag) =>
+                asset.tagIds.contains(tag.id) && children.containsKey(tag.id),
+          )) {
+            final candidates = children[parent.id]!;
+            final scores = <TagSuggestion>[];
+            // The generic suggestion protocol accepts at most 512 candidates.
+            for (var offset = 0; offset < candidates.length; offset += 512) {
+              if (_closingWindow || !identical(library, _library)) {
+                throw StateError('Library closed.');
+              }
+              scores.addAll(
+                await _suggestTags(
+                  asset,
+                  candidateLabels: candidates
+                      .skip(offset)
+                      .take(512)
+                      .map((tag) => tag.name)
+                      .toList(),
+                ),
+              );
+            }
+            final byName = {
+              for (final child in candidates) child.name.toLowerCase(): child,
+            };
+            final ranked =
+                scores
+                    .where(
+                      (score) => byName.containsKey(score.label.toLowerCase()),
+                    )
+                    .toList()
+                  ..sort((a, b) => b.score.compareTo(a.score));
+            for (var i = 0; i < ranked.length && i < 3; i++) {
+              final score = ranked[i];
+              matches.add(
+                HierarchyMatch(
+                  asset,
+                  parent,
+                  byName[score.label.toLowerCase()]!,
+                  score.score,
+                  i == 0,
+                ),
+              );
+            }
+          }
+          return matches;
+        },
+        apply: (accepted) async {
+          if (_closingWindow || !identical(library, _library)) {
+            throw StateError('Library closed.');
+          }
+          await library.applyReviewedTags(
+            eligible.where((asset) => accepted.containsKey(asset.id)).toList(),
+            [],
+            [],
+            accepted,
+          );
+        },
+      ),
+    );
+    await _reload();
+  });
+
   void _findTagMatches(LibraryTag tag) => _run(() async {
     final library = _library;
     if (library == null) return;
     final assets = (await library.assets())
         .where((asset) => !asset.missing && !asset.tagIds.contains(tag.id))
         .toList();
+    if (_closingWindow) return;
     final classifier = _imageClassifier;
     final modelId = _mlSettings.modelId;
     List<String> labels = [];
@@ -1097,7 +1232,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     } catch (error) {
       classifierError = error.toString();
     }
-    if (!mounted || !identical(library, _library)) return;
+    if (!mounted || _closingWindow || !identical(library, _library)) return;
     await showDialog<bool>(
       context: context,
       barrierDismissible: false,
@@ -1109,6 +1244,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
         classifierThreshold: _mlSettings.threshold,
         thumbnail: library.thumbnail,
         score: (asset, source, label) async {
+          if (_closingWindow) throw StateError('Application is closing.');
           if (!identical(library, _library)) {
             throw StateError('Library changed.');
           }
@@ -1239,17 +1375,49 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     if (asset != null) _openAssetExternally(asset);
   }
 
+  // Opens via the runner's own channel rather than url_launcher, which calls
+  // ShellExecute on the UI thread: Windows can take seconds to load its shell
+  // components the first time, freezing the whole window meanwhile.
+  static const _shellChannel = MethodChannel('umbra_tags/shell');
+
   void _openAssetExternally(LibraryAsset asset) => _run(() async {
     if (_library == null) return;
     final file = File(_library!.absolutePath(asset.relativePath));
     if (!await file.exists()) {
       throw LibraryException('This image file is missing from the library.');
     }
-    if (!await launchUrl(file.uri, mode: LaunchMode.externalApplication)) {
+    if (await _shellChannel.invokeMethod<bool>('openFile', file.path) != true) {
       throw LibraryException(
         'Could not open this image. Choose a default app for its file type in your system settings.',
       );
     }
+  });
+
+  static const _clipboardChannel = MethodChannel('umbra_tags/clipboard');
+
+  void _copyImageToClipboard(String path) => _run(() async {
+    final asset = _assetsByPath[path];
+    if (asset == null || _library == null) return;
+    final file = File(_library!.absolutePath(asset.relativePath));
+    if (!await file.exists()) {
+      throw LibraryException('This image file is missing from the library.');
+    }
+    // The native side decodes with GDI+, which has no WebP codec.
+    if (p.extension(file.path).toLowerCase() != '.webp') {
+      await _clipboardChannel.invokeMethod<void>('copyImage', file.path);
+      return;
+    }
+    final source = file.path;
+    final png = await Isolate.run(() {
+      final decoded = img.decodeImage(File(source).readAsBytesSync());
+      return decoded == null ? null : img.encodePng(decoded);
+    });
+    if (png == null) throw LibraryException('Could not decode this image.');
+    final temp = File(
+      p.join(Directory.systemTemp.path, 'umbra-tags-clipboard.png'),
+    );
+    await temp.writeAsBytes(png, flush: true);
+    await _clipboardChannel.invokeMethod<void>('copyImage', temp.path);
   });
 
   void _archiveSelection() => _run(() async {
@@ -1275,22 +1443,78 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
 
   @override
   void onWindowClose() async {
+    if (_closingWindow) return;
     _closeRequested = true;
     _cancelClassification = true;
-    if (_busy || _closingWindow) return;
-    _closingWindow = true;
+    setState(() {
+      _closingWindow = true;
+      _status = 'Closing…';
+    });
+    final timer = Stopwatch()..start();
+    final timings = <String>['Shutdown ${DateTime.now().toIso8601String()}'];
+    Future<void> step(String name, Future<void> Function() action) async {
+      final stage = Stopwatch()..start();
+      try {
+        await action();
+      } catch (error) {
+        timings.add('$name failed: $error');
+        debugPrint('Shutdown $name failed: $error');
+      } finally {
+        timings.add('$name: ${stage.elapsedMilliseconds} ms');
+        debugPrint('Shutdown $name: ${stage.elapsedMilliseconds} ms');
+      }
+    }
+
     _rememberScrollPosition();
+    _resizeTimer?.cancel();
     _sessionTimer?.cancel();
+    _library?.cancelBackgroundWork();
+    // Dismiss review/configuration dialogs so _run can finish. In-flight
+    // catalog transactions still complete before the library is closed.
+    Navigator.of(context).popUntil((route) => route.isFirst);
     _writeSession();
-    await _sessionWrite;
-    await _receiver?.close();
-    await _standbyEmbedder?.dispose();
+    final operationIdle = _operationIdle?.future;
+    await Future.wait([
+      step('settings', () => _sessionWrite),
+      step('receiver', () async {
+        await _receiver?.close();
+      }),
+      step('standby model', () async {
+        await _standbyEmbedder?.dispose();
+      }),
+      step('tag model', () async {
+        await _tagSuggester?.dispose();
+      }),
+      step('classifier', () async {
+        await _classifier?.dispose();
+      }),
+      step('similarity', _stopSimilarity),
+      step('active operation', () async {
+        await operationIdle;
+      }),
+      step('options save', () async {
+        await _applyingOptions;
+      }),
+    ]);
     _standbyEmbedder = null;
-    await _tagSuggester?.dispose();
     _tagSuggester = null;
-    await _classifier?.dispose();
-    await _stopSimilarity();
-    await _library?.close();
+    _classifier = null;
+    await step('library', () async {
+      await _library?.close();
+    });
+    await step('final settings', () => _sessionWrite);
+    debugPrint('Shutdown total: ${timer.elapsedMilliseconds} ms');
+    timings.add('Total: ${timer.elapsedMilliseconds} ms');
+    // Keep the last shutdown breakdown available in installed Release builds.
+    // Diagnostic I/O must never prevent the window from closing.
+    try {
+      await (() async {
+        final settings = widget.sessionFile ?? await _sessionFile();
+        await File(
+          p.join(settings.parent.path, 'shutdown-timing.log'),
+        ).writeAsString('${timings.join('\n')}\n');
+      })().timeout(const Duration(milliseconds: 500));
+    } catch (_) {}
     await windowManager.destroy();
   }
 
@@ -1308,7 +1532,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     _rememberScrollPosition();
     _resizeTimer?.cancel();
     _sessionTimer?.cancel();
-    _writeSession();
+    if (!_closingWindow) _writeSession();
     windowManager.removeListener(this);
     unawaited(_standbyEmbedder?.dispose() ?? Future<void>.value());
     unawaited(_receiver?.close() ?? Future<void>.value());
@@ -1723,9 +1947,17 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                     ),
                               onContextSelect: () =>
                                   _selectContextImage(_imagePaths[index]),
+                              onCopyImage: _busy
+                                  ? null
+                                  : () => _copyImageToClipboard(
+                                      _imagePaths[index],
+                                    ),
+                              onEditTags: _busy ? null : _editSelectionTags,
                               onArchive: _busy ? null : _archiveSelection,
                               archived: _showArchived,
                               onDelete: _busy ? null : _deleteSelection,
+                              onRefine: _busy ? null : _refineSelection,
+                              canRefine: _canRefineSelection,
                               onClassify: _busy ? null : _classifySelection,
                               onSimilar: _busy
                                   ? null
@@ -1763,9 +1995,17 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                     ),
                               onContextSelect: () =>
                                   _selectContextImage(_imagePaths[index]),
+                              onCopyImage: _busy
+                                  ? null
+                                  : () => _copyImageToClipboard(
+                                      _imagePaths[index],
+                                    ),
+                              onEditTags: _busy ? null : _editSelectionTags,
                               onArchive: _busy ? null : _archiveSelection,
                               archived: _showArchived,
                               onDelete: _busy ? null : _deleteSelection,
+                              onRefine: _busy ? null : _refineSelection,
+                              canRefine: _canRefineSelection,
                               onClassify: _busy ? null : _classifySelection,
                               onSimilar: _busy
                                   ? null
@@ -1943,10 +2183,14 @@ class GalleryTile extends StatelessWidget {
     required this.onTap,
     this.onDoubleTap,
     this.onContextSelect,
+    this.onCopyImage,
+    this.onEditTags,
     this.onArchive,
     this.archived = false,
     this.onDelete,
     this.onClassify,
+    this.onRefine,
+    this.canRefine,
     this.onSimilar,
   });
 
@@ -1957,11 +2201,15 @@ class GalleryTile extends StatelessWidget {
   final double tileSize;
   final LayoutMode layout;
   final bool selected, archived;
+  final bool Function()? canRefine;
   final VoidCallback onTap;
   final VoidCallback? onDoubleTap,
       onContextSelect,
+      onCopyImage,
+      onEditTags,
       onArchive,
       onDelete,
+      onRefine,
       onClassify,
       onSimilar;
 
@@ -2042,13 +2290,25 @@ class GalleryTile extends StatelessWidget {
       ),
       popUpAnimationStyle: AnimationStyle.noAnimation,
       items: [
+        PopupMenuItem(
+          value: 'copyImage',
+          enabled: onCopyImage != null,
+          child: const Text('Copy image to clipboard'),
+        ),
         const PopupMenuItem(value: 'copy', child: Text('Copy file path')),
+        PopupMenuItem(
+          value: 'tags',
+          enabled: onEditTags != null,
+          child: const Text('Edit tags…'),
+        ),
         const PopupMenuItem(value: 'info', child: Text('Image info')),
         PopupMenuItem(
           value: 'similar',
           enabled: onSimilar != null,
           child: const Text('Find similar'),
         ),
+        if (onRefine != null && (canRefine?.call() ?? false))
+          const PopupMenuItem(value: 'refine', child: Text('AI refine tags…')),
         PopupMenuItem(
           value: 'classify',
           enabled: onClassify != null,
@@ -2067,8 +2327,11 @@ class GalleryTile extends StatelessWidget {
       ],
     );
     if (choice == 'copy') await Clipboard.setData(ClipboardData(text: path));
+    if (choice == 'copyImage' && context.mounted) onCopyImage?.call();
+    if (choice == 'tags' && context.mounted) onEditTags?.call();
     if (choice == 'archive' && context.mounted) onArchive?.call();
     if (choice == 'delete' && context.mounted) onDelete?.call();
+    if (choice == 'refine' && context.mounted) onRefine?.call();
     if (choice == 'classify' && context.mounted) onClassify?.call();
     if (choice == 'similar' && context.mounted) onSimilar?.call();
     if (choice == 'info' && context.mounted) {

@@ -4,6 +4,7 @@
 
 #include "flutter_window.h"
 #include "utils.h"
+#include "shutdown_trace.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
@@ -38,6 +39,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     ::DispatchMessage(&msg);
   }
 
+  // The quit message is posted only after Dart has saved settings, stopped
+  // workers and closed the library. Hide now; do not leave a frozen window up
+  // while graphics resources and plugins are being released.
+  if (window.GetHandle()) ::ShowWindow(window.GetHandle(), SW_HIDE);
+  TraceNativeShutdown("window hidden; native teardown starting");
+  // Release Flutter/plugin COM resources while COM is still initialized.
+  // Relying on the stack destructor here previously reversed this order.
+  window.Destroy();
+  TraceNativeShutdown("window and Flutter destroyed; COM cleanup starting");
   ::CoUninitialize();
+  TraceNativeShutdown("COM cleanup complete; process returning");
   return EXIT_SUCCESS;
 }

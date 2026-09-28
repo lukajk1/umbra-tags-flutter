@@ -8,6 +8,9 @@
 #ifndef AppVersion
   #define AppVersion "1.0.0"
 #endif
+#ifndef Mode
+  #define Mode "Full"
+#endif
 #define AppExeName "flutter_gallery_test.exe"
 
 [Setup]
@@ -23,12 +26,16 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 OutputDir={#OutputDir}
-OutputBaseFilename=UmbraTags-Flutter-Setup-{#AppVersion}
+OutputBaseFilename=UmbraTags-Flutter-{#Mode}-Setup-{#AppVersion}
 SetupIconFile=..\windows\runner\resources\app_icon.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 Compression=lzma2/fast
 SolidCompression=yes
+#if Mode == "Full"
 DiskSpanning=yes
+#else
+DiskSpanning=no
+#endif
 WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
@@ -40,7 +47,15 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
+#if Mode == "Full"
 Source: "{#BundleDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+#else
+Source: "{#BundleDir}\*"; DestDir: "{app}"; Excludes: "umbra-tags-ml\*"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#BundleDir}\umbra-tags-ml\*.py"; DestDir: "{app}\umbra-tags-ml"; Flags: ignoreversion
+Source: "{#BundleDir}\umbra-tags-ml\*.json"; DestDir: "{app}\umbra-tags-ml"; Excludes: "ml-runtime.json"; Flags: ignoreversion
+Source: "{#BundleDir}\umbra-tags-ml\*.txt"; DestDir: "{app}\umbra-tags-ml"; Flags: ignoreversion
+Source: "{#BundleDir}\umbra-tags-ml\ml_adapters\*"; DestDir: "{app}\umbra-tags-ml\ml_adapters"; Flags: ignoreversion recursesubdirs createallsubdirs
+#endif
 
 [Icons]
 Name: "{group}\Umbra Tags (Flutter)"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#AppExeName}"

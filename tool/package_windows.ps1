@@ -1,4 +1,4 @@
-param([string]$OutputDirectory, [string]$VcRuntimeDirectory)
+param([string]$OutputDirectory, [string]$VcRuntimeDirectory, [ValidateSet('App','Full','Runtime')][string]$Mode = 'Full')
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $mlRoot = Join-Path (Split-Path -Parent $projectRoot) 'umbra-tags-ml'
@@ -28,11 +28,18 @@ foreach ($dll in @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
         throw "Missing Visual C++ redistributable DLL $dll. Supply -VcRuntimeDirectory pointing to the x64 Microsoft.VC143.CRT folder."
     }
 }
-foreach ($required in @((Join-Path $releaseRoot 'flutter_gallery_test.exe'), $venvPython, (Join-Path $mlRoot 'models/siglip2-base-224/bundle.json'), (Join-Path $mlRoot 'models/siglip2-text-224/bundle.json'))) {
-    if (-not (Test-Path -LiteralPath $required)) { throw "Missing $required. Build the release app and prepare the bundled model first." }
+$requiredFiles = @((Join-Path $mlRoot 'runtime-requirements.json'))
+if ($Mode -ne 'Runtime') { $requiredFiles += Join-Path $releaseRoot 'flutter_gallery_test.exe' }
+if ($Mode -ne 'App') {
+    $requiredFiles += @($venvPython, (Join-Path $mlRoot 'models/siglip2-base-224/bundle.json'), (Join-Path $mlRoot 'models/siglip2-text-224/bundle.json'))
 }
-$pythonBase = (& $venvPython -c 'import sys; print(sys.base_prefix)').Trim()
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $pythonBase 'python.exe'))) { throw 'Could not locate the base Python runtime.' }
+foreach ($required in $requiredFiles) {
+    if (-not (Test-Path -LiteralPath $required)) { throw "Missing $required. Prepare the release/model files first." }
+}
+if ($Mode -ne 'App') {
+    $pythonBase = (& $venvPython -c 'import sys; print(sys.base_prefix)').Trim()
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $pythonBase 'python.exe'))) { throw 'Could not locate the base Python runtime.' }
+}
 function Copy-Tree([string]$Source, [string]$Target, [string[]]$Exclusions = @()) {
     $options = @($Source, $Target, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/R:1', '/W:1', '/XF', '*.pyc', '_virtualenv.pth', '_virtualenv.py')
     if ($Exclusions.Count) { $options += '/XD'; $options += $Exclusions }
@@ -40,15 +47,24 @@ function Copy-Tree([string]$Source, [string]$Target, [string[]]$Exclusions = @()
     if ($LASTEXITCODE -ge 8) { throw "Copy failed: $Source" }
 }
 New-Item -ItemType Directory -Path $destination | Out-Null
-Copy-Tree $releaseRoot $destination
+if ($Mode -ne 'Runtime') { Copy-Tree $releaseRoot $destination }
 Get-ChildItem -LiteralPath $VcRuntimeDirectory -Filter '*.dll' -File | Copy-Item -Destination $destination
 $bundledMl = Join-Path $destination 'umbra-tags-ml'
 $bundledPython = Join-Path $bundledMl 'python'
-New-Item -ItemType Directory -Path $bundledPython -Force | Out-Null
-foreach ($name in @('runner.py','embedding_worker.py','embedding.json','tag_worker.py','tagging.json','tag_vocabulary.json','models.json','requirements.txt','README.md','best_model.pth','model.pth')) {
+New-Item -ItemType Directory -Path $bundledMl -Force | Out-Null
+if ($Mode -ne 'Runtime') {
+foreach ($name in @('runner.py','embedding_worker.py','embedding.json','tag_worker.py','tagging.json','tag_vocabulary.json','models.json','requirements.txt','README.md','runtime_paths.py','runtime-requirements.json')) {
     Copy-Item -LiteralPath (Join-Path $mlRoot $name) -Destination $bundledMl
 }
 Copy-Tree (Join-Path $mlRoot 'ml_adapters') (Join-Path $bundledMl 'ml_adapters')
+}
+if ($Mode -eq 'App') {
+    Write-Output "Packaged app-only update: $destination"
+    return
+}
+New-Item -ItemType Directory -Path $bundledPython -Force | Out-Null
+foreach ($name in @('best_model.pth','model.pth')) { Copy-Item -LiteralPath (Join-Path $mlRoot $name) -Destination $bundledMl }
+Copy-Item -LiteralPath (Join-Path $mlRoot 'runtime-requirements.json') -Destination (Join-Path $bundledMl 'ml-runtime.json')
 Copy-Tree (Join-Path $mlRoot 'models') (Join-Path $bundledMl 'models')
 Get-ChildItem -LiteralPath $pythonBase -File | Where-Object { $_.Extension -in '.exe','.dll' -or $_.Name -eq 'LICENSE.txt' } | Copy-Item -Destination $bundledPython
 Copy-Tree (Join-Path $pythonBase 'DLLs') (Join-Path $bundledPython 'DLLs')
@@ -57,6 +73,10 @@ Copy-Tree (Join-Path $mlRoot '.venv/Lib/site-packages') (Join-Path $bundledPytho
 Get-ChildItem -LiteralPath $VcRuntimeDirectory -Filter '*.dll' -File | Copy-Item -Destination $bundledPython
 $pythonVersion = (& $venvPython -c 'import sys; print(str(sys.version_info.major)+str(sys.version_info.minor))').Trim()
 @('.', 'Lib', 'DLLs', 'Lib\site-packages', 'import site') | Set-Content -LiteralPath (Join-Path $bundledPython "python$pythonVersion._pth") -Encoding ascii
+if ($Mode -eq 'Runtime') {
+    Write-Output "Packaged ML runtime: $destination"
+    return
+}
 @'
 Umbra Tags for Windows
 
