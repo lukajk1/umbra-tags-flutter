@@ -1759,15 +1759,19 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
           candidate,
     ];
     if (paths.isEmpty) return;
-    _draggingOut = true;
+    // Rebuild so the gallery's import drop target switches off; otherwise its
+    // "Drop images to import" overlay shows as the drag leaves the window.
+    setState(() => _draggingOut = true);
     try {
+      // The drag starts over this window, so apply that rebuild first.
+      await WidgetsBinding.instance.endOfFrame;
       await _dragChannel.invokeMethod<bool>('startFileDrag', paths);
     } on MissingPluginException {
       // Only the Windows runner can start an outgoing file drag.
     } on PlatformException {
       // Nothing was dragged; the selection is unchanged.
     } finally {
-      _draggingOut = false;
+      if (mounted) setState(() => _draggingOut = false);
     }
   }
 
@@ -2129,7 +2133,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                       ),
                       Expanded(
                         child: GalleryDropTarget(
-                          enabled: !_busy && !_closingWindow,
+                          enabled: !_busy && !_closingWindow && !_draggingOut,
                           onFiles: (files) {
                             if (!_draggingOut) {
                               _run(() => _importImageFiles(files));
@@ -2647,16 +2651,12 @@ class GalleryTile extends StatelessWidget {
         PopupMenuItem(
           value: 'tags',
           enabled: onEditTags != null,
-          child: const Row(
-            children: [
-              Icon(Icons.label_outline, size: 18),
-              SizedBox(width: 10),
-              Text('Edit tags…'),
-            ],
-          ),
+          child: const _MenuLabel(Icons.label_outline, 'Edit tags…'),
         ),
-        const PopupMenuItem(value: 'copy', child: Text('Copy file path')),
-        const PopupMenuItem(value: 'info', child: Text('Image info')),
+        const PopupMenuItem(
+          value: 'info',
+          child: _MenuLabel(Icons.info_outline, 'Image info'),
+        ),
         PopupMenuItem(
           value: 'similar',
           enabled: onSimilar != null,
@@ -2672,16 +2672,20 @@ class GalleryTile extends StatelessWidget {
         PopupMenuItem(
           value: 'archive',
           enabled: onArchive != null,
-          child: Text(archived ? 'Restore from archive' : 'Archive'),
+          child: archived
+              ? const _MenuLabel(
+                  Icons.unarchive_outlined,
+                  'Restore from archive',
+                )
+              : const _MenuLabel(Icons.archive_outlined, 'Archive'),
         ),
         PopupMenuItem(
           value: 'delete',
           enabled: onDelete != null,
-          child: const Text('Delete'),
+          child: const _MenuLabel(Icons.delete_outline, 'Delete'),
         ),
       ],
     );
-    if (choice == 'copy') await Clipboard.setData(ClipboardData(text: path));
     if (choice == 'copyImage' && context.mounted) onCopyImage?.call();
     if (choice == 'tags' && context.mounted) onEditTags?.call();
     if (choice == 'archive' && context.mounted) onArchive?.call();
@@ -2705,6 +2709,18 @@ class GalleryTile extends StatelessWidget {
       );
     }
   }
+}
+
+/// A context menu entry with a leading icon.
+class _MenuLabel extends StatelessWidget {
+  const _MenuLabel(this.icon, this.label);
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Row(
+    children: [Icon(icon, size: 18), const SizedBox(width: 10), Text(label)],
+  );
 }
 
 class _MarqueePainter extends CustomPainter {
