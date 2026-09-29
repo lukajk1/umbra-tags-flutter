@@ -6,7 +6,6 @@ import 'dart:isolate';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_staggered_grid_view/flutter_staggered_grid_view.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:path_provider/path_provider.dart';
@@ -27,6 +26,8 @@ import 'widgets/ml_settings_dialog.dart';
 import 'widgets/options_dialog.dart';
 import 'widgets/preview_details.dart';
 import 'widgets/gallery_drop_target.dart';
+import 'widgets/downloads_import_dialog.dart';
+import 'widgets/exact_masonry.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -149,8 +150,14 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   bool _previewVisible = true;
 
   // Marquee selection state
+  // Alt + left-drag draws a selection box (marquee).
   Offset? _dragStart;
   Offset? _dragCurrent;
+  // A plain left-drag starting on a tile drags its files out to other apps.
+  Offset? _fileDragOrigin;
+  String? _fileDragPath;
+  bool _draggingOut = false;
+  static const _dragChannel = MethodChannel('umbra_tags/drag');
   final _gridKey = GlobalKey();
   final _scrollController = ScrollController();
   final _galleryFocus = FocusNode(debugLabel: 'Gallery');
@@ -1010,12 +1017,60 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     await _importImageFiles(files);
   });
 
+  void _importFromDownloads() => _run(() async {
+    if (_library == null) return;
+    final folder = (await getDownloadsDirectory())?.path;
+    if (folder == null) {
+      throw LibraryException('Could not find the Downloads folder.');
+    }
+    final files = <File>[];
+    await for (final entity in Directory(folder).list(followLinks: false)) {
+      final extension = p.extension(entity.path).toLowerCase();
+      if (entity is File &&
+          LibraryStore.supportedExtensions.contains(
+            extension.replaceFirst('.', ''),
+          )) {
+        files.add(entity);
+      }
+    }
+    if (files.isEmpty) {
+      if (mounted) setState(() => _status = 'No images found in Downloads');
+      return;
+    }
+    final modified = await Future.wait(
+      files.map((file) => file.lastModified()),
+    );
+    final order = {
+      for (var i = 0; i < files.length; i++) files[i].path: modified[i],
+    };
+    files.sort((a, b) => order[b.path]!.compareTo(order[a.path]!));
+    if (!mounted) return;
+    final chosen = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => DownloadsImportDialog(
+        folder: folder,
+        files: files,
+        accent: AppColors.accent,
+        onOpen: (path) => unawaited(
+          _shellChannel
+              .invokeMethod<bool>('openFile', path)
+              .catchError((_) => null),
+        ),
+      ),
+    );
+    if (chosen == null || chosen.isEmpty) return;
+    await _importImageFiles([for (final path in chosen) XFile(path)]);
+  });
+
+  // Once imported (or found already in the library), source files move to the
+  // Recycle Bin. Files inside the library folder are never touched.
   Future<void> _importImageFiles(List<XFile> files) async {
     final library = _library;
     if (library == null || files.isEmpty) return;
     var added = 0;
     var duplicates = 0;
     final errors = <String>[];
+    final sources = <String>[];
     for (var i = 0; i < files.length; i++) {
       if (_closingWindow) break;
       if (mounted) {
@@ -1023,6 +1078,11 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       }
       try {
         final result = await library.importImage(files[i].path);
+        final source = p.absolute(files[i].path);
+        if (!p.isWithin(library.root, source) &&
+            !p.equals(library.root, source)) {
+          sources.add(source);
+        }
         if (result.duplicate) {
           duplicates++;
         } else {
@@ -1032,13 +1092,27 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
         errors.add('${files[i].name}: $error');
       }
     }
-    if (files.isEmpty) return;
+    var recycled = 0;
+    if (sources.isNotEmpty) {
+      try {
+        await _shellChannel.invokeMethod<bool>('recycleFiles', sources);
+        recycled = sources.length;
+      } on MissingPluginException {
+        // Only the Windows runner provides this; elsewhere originals stay put.
+      } on PlatformException catch (error) {
+        errors.add(
+          'Imported, but the originals were not moved to the Recycle Bin: '
+          '${error.message}',
+        );
+      }
+    }
     _thumbnails.clear();
     await _reload();
     if (mounted) {
       setState(
         () => _status =
             '$added imported · $duplicates already in library'
+            '${recycled > 0 ? ' · $recycled originals moved to Recycle Bin' : ''}'
             '${errors.isNotEmpty ? ' · ${errors.length} failed' : ''}',
       );
     }
@@ -1553,6 +1627,49 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     return Rect.fromPoints(_dragStart!, _dragCurrent!);
   }
 
+  String? _tileAt(Offset position) {
+    final gridBox = _gridKey.currentContext?.findRenderObject() as RenderBox?;
+    if (gridBox == null) return null;
+    for (final path in _imagePaths) {
+      final tileBox =
+          _tileKeys[path]?.currentContext?.findRenderObject() as RenderBox?;
+      if (tileBox == null) continue;
+      final offset = tileBox.localToGlobal(Offset.zero, ancestor: gridBox);
+      if ((offset & tileBox.size).contains(position)) return path;
+    }
+    return null;
+  }
+
+  // Drags the selection, or just the pressed tile when it is not selected.
+  // The native drag loop runs until the drop; drops back onto this window are
+  // ignored rather than re-imported.
+  Future<void> _startFileDrag(String path) async {
+    if (!_selectedPaths.contains(path)) {
+      setState(
+        () => _selectedPaths
+          ..clear()
+          ..add(path),
+      );
+    }
+    final paths = [
+      for (final candidate in _imagePaths)
+        if (_selectedPaths.contains(candidate) &&
+            _assetsByPath[candidate]?.missing == false)
+          candidate,
+    ];
+    if (paths.isEmpty) return;
+    _draggingOut = true;
+    try {
+      await _dragChannel.invokeMethod<bool>('startFileDrag', paths);
+    } on MissingPluginException {
+      // Only the Windows runner can start an outgoing file drag.
+    } on PlatformException {
+      // Nothing was dragged; the selection is unchanged.
+    } finally {
+      _draggingOut = false;
+    }
+  }
+
   void _updateMarqueeSelection() {
     final rect = _selectionRect;
     if (rect == null) return;
@@ -1600,6 +1717,12 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                 MenuItemButton(
                   onPressed: _busy || _library == null ? null : _importImages,
                   child: const Text('Import images…'),
+                ),
+                MenuItemButton(
+                  onPressed: _busy || _library == null
+                      ? null
+                      : _importFromDownloads,
+                  child: const Text('Import from Downloads…'),
                 ),
                 MenuItemButton(
                   onPressed: _busy || _library == null ? null : _backupLibrary,
@@ -1889,7 +2012,9 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                 Expanded(
                   child: GalleryDropTarget(
                     enabled: !_busy && !_closingWindow,
-                    onFiles: (files) => _run(() => _importImageFiles(files)),
+                    onFiles: (files) {
+                      if (!_draggingOut) _run(() => _importImageFiles(files));
+                    },
                     child: LayoutBuilder(
                       builder: (context, constraints) {
                         _onLayoutWidth(constraints.maxWidth);
@@ -1917,16 +2042,15 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                           );
                         }
                         if (_layout == LayoutMode.masonry) {
-                          grid = MasonryGridView.builder(
+                          grid = ExactMasonryView(
                             key: _gridKey,
                             controller: _scrollController,
-                            gridDelegate:
-                                SliverSimpleGridDelegateWithFixedCrossAxisCount(
-                                  crossAxisCount: cols,
-                                ),
-                            mainAxisSpacing: 8,
-                            crossAxisSpacing: 8,
-                            itemCount: _imagePaths.length,
+                            columns: cols,
+                            spacing: 8,
+                            aspectRatios: [
+                              for (final asset in _assets)
+                                asset.width / asset.height,
+                            ],
                             itemBuilder: (context, index) => GalleryTile(
                               key: _tileKeys[_imagePaths[index]],
                               path: _imagePaths[index],
@@ -2040,15 +2164,23 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                 // Keep scrollbar drags outside selection hit testing.
                                 child: Listener(
                                   onPointerDown: (e) {
-                                    // Only start marquee on left button drag, not scroll wheel
-                                    if (!_busy &&
-                                        e.kind == PointerDeviceKind.mouse &&
-                                        e.buttons == kPrimaryMouseButton) {
-                                      _galleryFocus.requestFocus();
+                                    // Left button only, not the scroll wheel.
+                                    if (_busy ||
+                                        e.kind != PointerDeviceKind.mouse ||
+                                        e.buttons != kPrimaryMouseButton) {
+                                      return;
+                                    }
+                                    _galleryFocus.requestFocus();
+                                    if (HardwareKeyboard
+                                        .instance
+                                        .isAltPressed) {
                                       setState(() {
                                         _dragStart = e.localPosition;
                                         _dragCurrent = e.localPosition;
                                       });
+                                    } else {
+                                      _fileDragOrigin = e.localPosition;
+                                      _fileDragPath = _tileAt(e.localPosition);
                                     }
                                   },
                                   onPointerMove: (e) {
@@ -2057,15 +2189,24 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                         () => _dragCurrent = e.localPosition,
                                       );
                                       _updateMarqueeSelection();
+                                    } else if (_fileDragPath != null &&
+                                        (e.localPosition - _fileDragOrigin!)
+                                                .distance >
+                                            kTouchSlop / 3) {
+                                      final path = _fileDragPath!;
+                                      _fileDragPath = _fileDragOrigin = null;
+                                      _startFileDrag(path);
                                     }
                                   },
                                   onPointerUp: (_) => setState(() {
                                     _dragStart = null;
                                     _dragCurrent = null;
+                                    _fileDragPath = _fileDragOrigin = null;
                                   }),
                                   onPointerCancel: (_) => setState(() {
                                     _dragStart = null;
                                     _dragCurrent = null;
+                                    _fileDragPath = _fileDragOrigin = null;
                                   }),
                                   child: Stack(
                                     children: [

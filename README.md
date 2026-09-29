@@ -89,9 +89,16 @@ Rename / Move, and Delete. Deletion removes that tag's assignments and moves its
 children to its parent; it never deletes images. Tag names are globally unique
 within the library (ASCII case insensitive).
 
-Select images with click, Ctrl/Cmd-click, or marquee selection, then choose **Edit
+Select images with click, Ctrl/Cmd-click, or Alt + drag for a selection box, then choose **Edit
 tags** below the preview or **Edit → Edit tags…**. A dash means some selected images
 have the tag. Changes apply to the whole selection; untouched assignments remain.
+
+Drag an image without Alt to drop it, or the whole selection when it is part of
+one, into other applications as files (Explorer, chat apps, browser uploads).
+Drops always copy, so library files are never moved out. On Windows,
+**File → Import from Downloads…** lists the images in Downloads (newest first) to
+pick from. Every import from disk moves the originals to the Recycle Bin once they
+are safely in the library; files already inside the library folder are left alone.
 
 Click a sidebar tag to filter by that tag and all descendants. All Images and
 Untagged exclude archived images; Archived shows only archived images. The tag search

@@ -3,6 +3,7 @@
 #include <optional>
 
 #include "flutter/generated_plugin_registrant.h"
+#include "file_drag.h"
 #include "image_clipboard.h"
 #include "shell_open.h"
 #include "shutdown_trace.h"
@@ -30,7 +31,10 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   RegisterImageClipboardChannel(flutter_controller_->engine()->messenger(),
                                 GetHandle());
-  RegisterShellOpenChannel(flutter_controller_->engine()->messenger());
+  RegisterShellOpenChannel(flutter_controller_->engine()->messenger(),
+                           GetHandle());
+  RegisterFileDragChannel(flutter_controller_->engine()->messenger(),
+                          flutter_controller_->view()->GetNativeWindow());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
