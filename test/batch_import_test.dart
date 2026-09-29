@@ -129,7 +129,7 @@ void main() {
         tester,
         () => find.byType(TagDetailsDialog).evaluate().isEmpty && _idle(),
       );
-      await tester.tap(find.text('Inbox'));
+      await tester.tap(find.text('Inbox (0)'));
       await _until(
         tester,
         () => find.byType(GalleryTile).evaluate().isEmpty && _idle(),

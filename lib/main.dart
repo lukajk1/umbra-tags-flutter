@@ -157,6 +157,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   Offset? _fileDragOrigin;
   String? _fileDragPath;
   bool _draggingOut = false;
+  // Ctrl/Cmd state when the button went down. Tiles also accept double-clicks,
+  // so their tap callback runs only after the double-click window, by which
+  // time a quick Ctrl-click has usually released the key.
+  bool _toggleOnTap = false;
   static const _dragChannel = MethodChannel('umbra_tags/drag');
   final _gridKey = GlobalKey();
   final _scrollController = ScrollController();
@@ -1422,8 +1426,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     if (_busy) return;
     _galleryFocus.requestFocus();
     setState(() {
-      final keys = HardwareKeyboard.instance;
-      if (keys.isControlPressed || keys.isMetaPressed) {
+      if (_toggleOnTap) {
         if (!_selectedPaths.add(path)) _selectedPaths.remove(path);
       } else {
         _selectedPaths
@@ -2240,6 +2243,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                 // Keep scrollbar drags outside selection hit testing.
                                 child: Listener(
                                   onPointerDown: (e) {
+                                    final keys = HardwareKeyboard.instance;
+                                    _toggleOnTap =
+                                        keys.isControlPressed ||
+                                        keys.isMetaPressed;
                                     // Left button only, not the scroll wheel.
                                     if (_busy ||
                                         e.kind != PointerDeviceKind.mouse ||
@@ -2247,9 +2254,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                       return;
                                     }
                                     _galleryFocus.requestFocus();
-                                    if (HardwareKeyboard
-                                        .instance
-                                        .isAltPressed) {
+                                    if (keys.isAltPressed) {
                                       setState(() {
                                         _dragStart = e.localPosition;
                                         _dragCurrent = e.localPosition;

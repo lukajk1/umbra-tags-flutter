@@ -142,7 +142,7 @@ void main() {
       tester,
       () => find.text('No images match this filter').evaluate().isNotEmpty,
     );
-    await tester.tap(find.text('Portraits'));
+    await tester.tap(find.text('Portraits (1)'));
     await _until(
       tester,
       () =>

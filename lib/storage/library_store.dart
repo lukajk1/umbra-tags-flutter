@@ -72,6 +72,7 @@ class LibraryStore {
   static const supportedExtensions = [
     'jpg',
     'jpeg',
+    'jfif', // JPEG under another name; stored as .jpg.
     'png',
     'gif',
     'webp',

@@ -5,9 +5,14 @@ class LibraryTag {
   LibraryTag.fromMap(Map row)
     : id = row['id'] as String,
       name = row['name'] as String,
-      parentId = row['parent_id'] as String?;
+      parentId = row['parent_id'] as String?,
+      assetCount = row['asset_count'] as int? ?? 0;
   final String id, name;
   final String? parentId;
+
+  /// Non-archived images shown in this tag's view: those with the tag or any
+  /// of its descendants.
+  final int assetCount;
 }
 
 /// Used only on the library worker. Schema v1 already includes these tables.
@@ -20,9 +25,19 @@ class TagRepository {
   )''';
 
   List<Map<String, Object?>> tags() => db
-      .select(
-        'SELECT id,name,parent_id FROM tags ORDER BY name COLLATE NOCASE,id',
-      )
+      .select('''WITH RECURSIVE tree(root, id) AS (
+          SELECT id, id FROM tags
+          UNION SELECT tree.root, t.id FROM tags t JOIN tree ON t.parent_id = tree.id
+        ),
+        counts(root, n) AS (
+          SELECT tree.root, COUNT(DISTINCT at.asset_id) FROM tree
+          JOIN asset_tags at ON at.tag_id = tree.id
+          JOIN assets a ON a.id = at.asset_id AND a.archived = 0
+          GROUP BY tree.root
+        )
+        SELECT t.id,t.name,t.parent_id,COALESCE(c.n, 0) AS asset_count
+        FROM tags t LEFT JOIN counts c ON c.root = t.id
+        ORDER BY t.name COLLATE NOCASE,t.id''')
       .map((r) => Map<String, Object?>.from(r))
       .toList();
 

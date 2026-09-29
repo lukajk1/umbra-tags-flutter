@@ -36,6 +36,43 @@ void main() {
     ).writeAsBytes(img.encodePng(image));
   }
 
+  test(
+    'tag counts include descendants once and skip archived images',
+    () async {
+      final store = await create();
+      final parent = await store.saveTag(name: 'Parent');
+      final child = await store.saveTag(name: 'Child', parentId: parent);
+      final a = (await store.importImage((await picture('a.png')).path)).asset;
+      final b = (await store.importImage(
+        (await picture('b.png', width: 31)).path,
+      )).asset;
+      final c = (await store.importImage(
+        (await picture('c.png', width: 32)).path,
+      )).asset;
+      await store.editTags([a.id], add: [parent, child]);
+      await store.editTags([b.id, c.id], add: [child]);
+      await store.archive([c.id], true);
+      final counts = {
+        for (final tag in await store.tags()) tag.name: tag.assetCount,
+      };
+      expect(counts, {'Child': 2, 'Parent': 2});
+      expect(await store.assets(tagId: parent), hasLength(counts['Parent']!));
+    },
+  );
+
+  test('imports .jfif files as JPEGs', () async {
+    final store = await create();
+    final image = img.Image(width: 30, height: 20);
+    img.fill(image, color: img.ColorRgb8(200, 100, 50));
+    final source = await File(
+      p.join(sandbox.path, 'photo.jfif'),
+    ).writeAsBytes(img.encodeJpg(image));
+    final result = await store.importImage(source.path);
+    expect(result.duplicate, isFalse);
+    expect(result.asset.originalFilename, 'photo.jfif');
+    expect(result.asset.relativePath, endsWith('.jpg'));
+  });
+
   test('imports assign the given tags, including to duplicates', () async {
     final store = await create();
     final tag = await store.saveTag(name: 'Inbox');

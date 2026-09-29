@@ -25,6 +25,85 @@ List<({LibraryTag tag, int depth})> tagTree(List<LibraryTag> tags) {
   return result;
 }
 
+/// Indents a tag row by its depth and draws tree guides from each ancestor,
+/// so nesting reads at a glance. [origin] is the x offset of the row's
+/// leading control (e.g. a checkbox) centre, which the guides line up with.
+class TagTreeIndent extends StatelessWidget {
+  const TagTreeIndent({
+    super.key,
+    required this.depth,
+    required this.child,
+    this.step = 24,
+    this.origin = 28,
+  });
+  final int depth;
+  final Widget child;
+  final double step, origin;
+
+  @override
+  Widget build(BuildContext context) => depth == 0
+      ? child
+      : IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                width: depth * step,
+                child: CustomPaint(
+                  painter: _TagTreePainter(
+                    depth: depth,
+                    step: step,
+                    origin: origin,
+                    color: Colors.white38,
+                  ),
+                ),
+              ),
+              Expanded(child: child),
+            ],
+          ),
+        );
+}
+
+class _TagTreePainter extends CustomPainter {
+  _TagTreePainter({
+    required this.depth,
+    required this.step,
+    required this.origin,
+    required this.color,
+  });
+  final int depth;
+  final double step, origin;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1;
+    // One vertical guide per ancestor level, continuous across sibling rows.
+    for (var level = 0; level < depth; level++) {
+      final x = level * step + origin;
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    }
+    // Elbow from the parent's guide to just before this row's control. The
+    // canvas is not clipped, so it may reach past the indent into the row.
+    final parentX = (depth - 1) * step + origin;
+    final y = size.height / 2;
+    canvas.drawLine(
+      Offset(parentX, y),
+      Offset(depth * step + origin - 13, y),
+      paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_TagTreePainter old) =>
+      old.depth != depth ||
+      old.step != step ||
+      old.origin != origin ||
+      old.color != color;
+}
+
 class TagSidebar extends StatefulWidget {
   const TagSidebar({
     super.key,
@@ -199,8 +278,18 @@ class _TagSidebarState extends State<TagSidebar> {
                               minLeadingWidth: 16,
                               title: Tooltip(
                                 message: row.tag.name,
-                                child: Text(
-                                  row.tag.name,
+                                child: Text.rich(
+                                  TextSpan(
+                                    text: row.tag.name,
+                                    children: [
+                                      TextSpan(
+                                        text: ' (${row.tag.assetCount})',
+                                        style: const TextStyle(
+                                          color: Colors.white54,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
@@ -491,19 +580,31 @@ class _BatchTagsDialogState extends State<BatchTagsDialog> {
                   itemCount: rows.length,
                   itemBuilder: (context, index) {
                     final row = rows[index];
-                    return CheckboxListTile(
-                      key: ValueKey('assign-tag-${row.tag.id}'),
-                      title: Text('${'  ' * row.depth}${row.tag.name}'),
-                      dense: true,
-                      controlAffinity: ListTileControlAffinity.leading,
-                      tristate: true,
-                      value: _value(row.tag.id),
-                      onChanged: _saving
-                          ? null
-                          : (_) => setState(
-                              () => _changes[row.tag.id] =
-                                  _value(row.tag.id) != true,
-                            ),
+                    return TagTreeIndent(
+                      depth: row.depth,
+                      child: CheckboxListTile(
+                        key: ValueKey('assign-tag-${row.tag.id}'),
+                        title: Text(
+                          row.tag.name,
+                          style: row.depth == 0
+                              ? const TextStyle(fontWeight: FontWeight.w600)
+                              : null,
+                        ),
+                        contentPadding: const EdgeInsets.only(
+                          left: 8,
+                          right: 16,
+                        ),
+                        dense: true,
+                        controlAffinity: ListTileControlAffinity.leading,
+                        tristate: true,
+                        value: _value(row.tag.id),
+                        onChanged: _saving
+                            ? null
+                            : (_) => setState(
+                                () => _changes[row.tag.id] =
+                                    _value(row.tag.id) != true,
+                              ),
+                      ),
                     );
                   },
                 ),
