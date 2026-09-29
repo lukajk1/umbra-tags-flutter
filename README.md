@@ -99,6 +99,12 @@ children are then left out of All images (the tag shows an eye-slash icon), whil
 its own tag view, Untagged and Archived are unchanged. Choose **Show in All
 images** to undo it. This setting needs catalog v3; libraries upgrade on open.
 
+Right-click an image and choose **Star** to star it (or the whole selection);
+starred images show a star badge. Stars are separate from tags. The **Starred**
+toggle at the right of the breadcrumb strip shows only starred images and
+combines with the open view, so a tag view plus Starred lists images that are both
+in that tag and starred. Stars need catalog v4; libraries upgrade on open.
+
 Drag an image without Alt to drop it, or the whole selection when it is part of
 one, into other applications as files (Explorer, chat apps, browser uploads).
 Drops always copy, so library files are never moved out. On Windows,

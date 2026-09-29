@@ -88,7 +88,7 @@ void main() {
     expect(await store.assets(excludeHidden: true), hasLength(3));
   });
 
-  test('catalog v2 libraries upgrade to v3 after a backup', () async {
+  test('catalog v2 libraries upgrade to v4 after a backup per step', () async {
     final store = await create();
     final tag = await store.saveTag(name: 'Kept');
     final root = store.root;
@@ -96,6 +96,7 @@ void main() {
     opened.remove(store);
     final db = sqlite3.open(p.join(root, 'catalog.sqlite'));
     db.execute('ALTER TABLE tags DROP COLUMN excluded_from_all');
+    db.execute('ALTER TABLE assets DROP COLUMN starred');
     db.execute('PRAGMA user_version = 2');
     db.close();
 
@@ -108,8 +109,45 @@ void main() {
       Directory(
         p.join(root, 'backups'),
       ).listSync().map((f) => p.basename(f.path)),
-      contains(startsWith('catalog-before-v3-')),
+      containsAll([
+        startsWith('catalog-before-v3-'),
+        startsWith('catalog-before-v4-'),
+      ]),
     );
+  });
+
+  test('stars are independent of tags and combine with tag views', () async {
+    final store = await create();
+    final tag = await store.saveTag(name: 'env');
+    final a = (await store.importImage((await picture('a.png')).path)).asset;
+    final b = (await store.importImage(
+      (await picture('b.png', width: 31)).path,
+    )).asset;
+    final c = (await store.importImage(
+      (await picture('c.png', width: 32)).path,
+    )).asset;
+    expect(a.starred, isFalse);
+    await store.editTags([a.id, b.id], add: [tag]);
+    await store.setStarred([a.id, c.id], true);
+
+    Future<Set<String>> ids({String? tagId, bool starred = false}) async => {
+      for (final asset in await store.assets(
+        tagId: tagId,
+        starredOnly: starred,
+      ))
+        asset.id,
+    };
+    expect(await ids(starred: true), {a.id, c.id});
+    expect(await ids(tagId: tag, starred: true), {a.id});
+    expect(await ids(tagId: tag), {a.id, b.id});
+    // Starring leaves tags alone.
+    expect(
+      (await store.assets(tagId: tag)).firstWhere((x) => x.id == a.id).tagIds,
+      [tag],
+    );
+
+    await store.setStarred([a.id], false);
+    expect(await ids(tagId: tag, starred: true), isEmpty);
   });
 
   test('imports .jfif files as JPEGs', () async {

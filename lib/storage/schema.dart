@@ -1,7 +1,7 @@
 // Public, language-independent library format. See LIBRARY_FORMAT.md.
 const libraryFormat = 'umbra-tags-library';
 const libraryFormatVersion = 1;
-const librarySchemaVersion = 3;
+const librarySchemaVersion = 4;
 
 const createSchema =
     '''
@@ -23,7 +23,8 @@ CREATE TABLE assets (
   sha256 TEXT NOT NULL UNIQUE CHECK(length(sha256) = 64),
   perceptual_hash TEXT,
   archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
-  missing INTEGER NOT NULL DEFAULT 0 CHECK(missing IN (0, 1))
+  missing INTEGER NOT NULL DEFAULT 0 CHECK(missing IN (0, 1)),
+  starred INTEGER NOT NULL DEFAULT 0 CHECK(starred IN (0, 1))
 );
 CREATE INDEX assets_imported ON assets(archived, imported_at DESC, id);
 CREATE TABLE tag_groups (
@@ -71,7 +72,14 @@ CREATE TABLE jobs (
   updated_at INTEGER NOT NULL
 );
 $embeddingSchema
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
+''';
+
+// Additive v3 -> v4 migration: starred images, independent of tags.
+const starredMigration = '''
+ALTER TABLE assets ADD COLUMN
+  starred INTEGER NOT NULL DEFAULT 0 CHECK(starred IN (0, 1));
+PRAGMA user_version = 4;
 ''';
 
 // Additive v1 -> v2 migration: similarity embeddings.

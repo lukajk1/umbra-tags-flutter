@@ -13,6 +13,8 @@ class ViewBreadcrumbs extends StatelessWidget {
     required this.tagId,
     required this.onView,
     required this.onTag,
+    this.starredOnly = false,
+    this.onToggleStarred,
   });
 
   final List<LibraryTag> tags;
@@ -22,6 +24,10 @@ class ViewBreadcrumbs extends StatelessWidget {
   /// Null while navigation is unavailable (e.g. the app is busy).
   final ValueChanged<LibraryView>? onView;
   final ValueChanged<String>? onTag;
+
+  /// The starred-only filter, shown as a toggle at the end of the strip.
+  final bool starredOnly;
+  final VoidCallback? onToggleStarred;
 
   @override
   Widget build(BuildContext context) {
@@ -44,33 +50,75 @@ class ViewBreadcrumbs extends StatelessWidget {
     return Container(
       height: 32,
       color: const Color(0xFF171717), // AppColors.darker, like the side panels
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      alignment: Alignment.centerLeft,
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            for (var i = 0; i < crumbs.length; i++) ...[
-              if (i > 0)
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 2),
-                  child: Icon(
-                    Icons.chevron_right,
-                    size: 16,
-                    color: Colors.white38,
-                  ),
-                ),
-              _Crumb(
-                label: crumbs[i].$1,
-                current: i == crumbs.length - 1,
-                onTap: crumbs[i].$2,
+      padding: const EdgeInsets.only(left: 12, right: 8),
+      child: Row(
+        children: [
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  for (var i = 0; i < crumbs.length; i++) ...[
+                    if (i > 0)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 2),
+                        child: Icon(
+                          Icons.chevron_right,
+                          size: 16,
+                          color: Colors.white38,
+                        ),
+                      ),
+                    _Crumb(
+                      label: crumbs[i].$1,
+                      current: i == crumbs.length - 1,
+                      onTap: crumbs[i].$2,
+                    ),
+                  ],
+                ],
               ),
-            ],
-          ],
-        ),
+            ),
+          ),
+          _StarredToggle(on: starredOnly, onTap: onToggleStarred),
+        ],
       ),
     );
   }
+}
+
+class _StarredToggle extends StatelessWidget {
+  const _StarredToggle({required this.on, this.onTap});
+  final bool on;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) => Tooltip(
+    message: on ? 'Showing starred images only' : 'Show only starred images',
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              on ? Icons.star : Icons.star_outline,
+              size: 16,
+              color: on ? const Color(0xFFE8B63C) : Colors.white54,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              'Starred',
+              style: TextStyle(
+                fontSize: 13,
+                color: on ? Colors.white : Colors.white54,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class _Crumb extends StatelessWidget {

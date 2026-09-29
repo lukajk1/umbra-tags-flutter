@@ -6,7 +6,7 @@ This is a new format; legacy Calypso saves are deliberately not supported.
 
 ```
 library.json             # format identity (UTF-8 JSON)
-catalog.sqlite           # authoritative metadata, SQLite user_version = 3
+catalog.sqlite           # authoritative metadata, SQLite user_version = 4
 media/<id-prefix>/<id>.<ext>
 cache/thumbnails/<id>-<sha256>-v2.jpg
 cache/previews/          # reserved, rebuildable
@@ -36,13 +36,14 @@ converter. UUIDs are text. All timestamps are UTC milliseconds since the Unix ep
 Booleans are constrained SQLite integers, 0 or 1. Enable `PRAGMA foreign_keys=ON`
 on every connection. Format and database versions are checked independently; unknown
 versions are rejected. Older catalogs are upgraded transactionally one version at
-a time (v1 to v2, v2 to v3), each after a metadata backup is saved as
+a time (v1 to v2, v2 to v3, v3 to v4), each after a metadata backup is saved as
 `backups/catalog-before-v<new version>-<timestamp>.sqlite`. Upgraded catalogs
 cannot be opened by app versions that predate the new schema. The manifest ID must match the sole library row.
 
 * `assets`: one record per original, with portable path, original filename, MIME type,
   dimensions after EXIF orientation, byte size, import/source dates, exact SHA-256,
-  optional perceptual hash, archive and missing flags. SHA-256 is unique per library.
+  optional perceptual hash, archive and missing flags, and (catalog v4) a starred
+  flag independent of tags. SHA-256 is unique per library.
 * `tag_groups`, `tags`, `asset_tags`: normalized organization. Tag hierarchy uses
   parent IDs; children and depth are derived. Tag operations
   prevent multi-node cycles. SQLite NOCASE uniqueness is ASCII case insensitive.

@@ -73,6 +73,7 @@ abstract final class AppColors {
   static const darker = Color(0xFF171717);
   static const lighter = Color(0xFF262622);
   static const accent = Color(0xFFB5372D);
+  static const star = Color(0xFFE8B63C);
 }
 
 enum LayoutMode { crop, letterbox, masonry }
@@ -191,6 +192,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   bool _closingWindow = false;
   bool _showArchived = false;
   bool _untagged = false;
+  // Starred-only filter; combines with whichever view is open.
+  bool _starredOnly = false;
   String? _tagFilter;
   List<LibraryTag> _tags = [];
   List<LibraryAsset> get _selection => _selectedPaths
@@ -924,6 +927,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       untagged: _untagged,
       tagId: _tagFilter,
       excludeHidden: !_showArchived && !_untagged,
+      starredOnly: _starredOnly,
     );
     if (!mounted) return;
     setState(() {
@@ -946,6 +950,42 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
           '${assets.any((a) => a.missing) ? ' · ${assets.where((a) => a.missing).length} missing' : ''}';
     });
   }
+
+  /// The images a star action on [path] affects: the selection when [path]
+  /// is part of it, otherwise just [path].
+  List<LibraryAsset> _starTargets(String path) => [
+    for (final target
+        in _selectedPaths.contains(path) ? _selectedPaths : {path})
+      ?_assetsByPath[target],
+  ];
+
+  /// Whether starring [path] would star (true) or unstar (false): unstar only
+  /// when every target is already starred.
+  bool _starWillSet(String path) =>
+      !_starTargets(path).every((asset) => asset.starred);
+
+  void _toggleStar(String path) => _run(() async {
+    final targets = _starTargets(path);
+    if (targets.isEmpty) return;
+    final star = _starWillSet(path);
+    await _library!.setStarred([for (final a in targets) a.id], star);
+    await _reload();
+    if (mounted) {
+      setState(
+        () => _status =
+            '${star ? 'Starred' : 'Unstarred'} ${targets.length} '
+            '${targets.length == 1 ? 'image' : 'images'}',
+      );
+    }
+  });
+
+  void _toggleStarredOnly() => _run(() async {
+    _rememberScrollPosition();
+    _starredOnly = !_starredOnly;
+    _selectedPaths.clear();
+    await _reload();
+    _queueScrollRestore();
+  });
 
   /// A tag dropped on a selected image applies to the whole selection;
   /// dropped on any other image, to just that one.
@@ -1175,6 +1215,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     }
     _thumbnails.clear();
     if (imported.isNotEmpty && _showArchived) _showArchived = false;
+    // New imports are unstarred, so leave the starred filter to show them.
+    if (imported.isNotEmpty && _starredOnly) _starredOnly = false;
     await _reload();
     if (imported.isNotEmpty) {
       _showNewestImports(
@@ -2130,6 +2172,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                         onTag: _busy
                             ? null
                             : (id) => _setFilter(LibraryView.all, id),
+                        starredOnly: _starredOnly,
+                        onToggleStarred: _busy ? null : _toggleStarredOnly,
                       ),
                       Expanded(
                         child: GalleryDropTarget(
@@ -2232,6 +2276,13 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                         )
                                         ? _selectedPaths.length
                                         : 1,
+                                    starred: _assets[index].starred,
+                                    starWillSet: _starWillSet(
+                                      _imagePaths[index],
+                                    ),
+                                    onToggleStar: _busy
+                                        ? null
+                                        : () => _toggleStar(_imagePaths[index]),
                                   ),
                                 );
                               } else {
@@ -2300,6 +2351,13 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                         )
                                         ? _selectedPaths.length
                                         : 1,
+                                    starred: _assets[index].starred,
+                                    starWillSet: _starWillSet(
+                                      _imagePaths[index],
+                                    ),
+                                    onToggleStar: _busy
+                                        ? null
+                                        : () => _toggleStar(_imagePaths[index]),
                                   ),
                                 );
                               }
@@ -2530,6 +2588,9 @@ class GalleryTile extends StatelessWidget {
     this.onSimilar,
     this.onTagDropped,
     this.tagDropCount = 1,
+    this.starred = false,
+    this.starWillSet = true,
+    this.onToggleStar,
   });
 
   final String path;
@@ -2554,6 +2615,11 @@ class GalleryTile extends StatelessWidget {
   /// Assigns a tag dragged from the sidebar; [tagDropCount] images receive it.
   final ValueChanged<LibraryTag>? onTagDropped;
   final int tagDropCount;
+
+  /// Whether this image is starred (shows a badge), whether the menu's star
+  /// action would star or unstar its targets, and that action.
+  final bool starred, starWillSet;
+  final VoidCallback? onToggleStar;
 
   @override
   Widget build(BuildContext context) {
@@ -2610,6 +2676,17 @@ class GalleryTile extends StatelessWidget {
             layout == LayoutMode.masonry
                 ? AspectRatio(aspectRatio: aspectRatio, child: image)
                 : ColoredBox(color: AppColors.lighter, child: image),
+            if (starred)
+              const Positioned(
+                top: 6,
+                right: 6,
+                child: Icon(
+                  Icons.star,
+                  size: 18,
+                  color: AppColors.star,
+                  shadows: [Shadow(blurRadius: 4, color: Colors.black)],
+                ),
+              ),
             if (selected || candidates.isNotEmpty)
               Positioned.fill(
                 child: DecoratedBox(
@@ -2668,6 +2745,13 @@ class GalleryTile extends StatelessWidget {
           enabled: onEditTags != null,
           child: const _MenuLabel(Icons.label_outline, 'Edit tags…'),
         ),
+        PopupMenuItem(
+          value: 'star',
+          enabled: onToggleStar != null,
+          child: starWillSet
+              ? const _MenuLabel(Icons.star_outline, 'Star')
+              : const _MenuLabel(Icons.star, 'Unstar'),
+        ),
         const PopupMenuItem(
           value: 'info',
           child: _MenuLabel(Icons.info_outline, 'Image info'),
@@ -2703,6 +2787,7 @@ class GalleryTile extends StatelessWidget {
     );
     if (choice == 'copyImage' && context.mounted) onCopyImage?.call();
     if (choice == 'tags' && context.mounted) onEditTags?.call();
+    if (choice == 'star' && context.mounted) onToggleStar?.call();
     if (choice == 'archive' && context.mounted) onArchive?.call();
     if (choice == 'delete' && context.mounted) onDelete?.call();
     if (choice == 'refine' && context.mounted) onRefine?.call();

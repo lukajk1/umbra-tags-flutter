@@ -156,6 +156,7 @@ class TagRepository {
             ? excluded
             : ''}
       SELECT a.* FROM assets a WHERE a.archived = ?
+      ${args['starredOnly'] == true ? 'AND a.starred = 1' : ''}
       ${args['untagged'] == true ? 'AND NOT EXISTS (SELECT 1 FROM asset_tags at WHERE at.asset_id = a.id)' : ''}
       ${tagId == null ? '' : 'AND EXISTS (SELECT 1 FROM asset_tags at JOIN descendants d ON d.id = at.tag_id WHERE at.asset_id = a.id)'}
       ${excludeHidden ? 'AND NOT EXISTS (SELECT 1 FROM asset_tags at JOIN excluded e ON e.id = at.tag_id WHERE at.asset_id = a.id)' : ''}

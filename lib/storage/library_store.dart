@@ -38,6 +38,7 @@ class LibraryAsset {
       contentHash = row['sha256'] as String,
       missing = row['missing'] == 1,
       archived = row['archived'] == 1,
+      starred = row['starred'] == 1,
       tagIds = List<String>.unmodifiable(
         (row['tag_ids'] as List?)?.cast<String>() ?? const <String>[],
       );
@@ -45,7 +46,7 @@ class LibraryAsset {
   final String id, relativePath, originalFilename, contentHash;
   final int width, height;
   final DateTime? importedAt;
-  final bool missing, archived;
+  final bool missing, archived, starred;
   final List<String> tagIds;
   String get thumbnailRelativePath =>
       'cache/thumbnails/$id-$contentHash-v2.jpg';
@@ -143,12 +144,14 @@ class LibraryStore {
     bool untagged = false,
     String? tagId,
     bool excludeHidden = false,
+    bool starredOnly = false,
   }) async =>
       (await _call('assets', {
                 'archived': archived,
                 'untagged': untagged,
                 'tagId': tagId,
                 'excludeHidden': excludeHidden,
+                'starredOnly': starredOnly,
               })
               as List)
           .map(
@@ -212,6 +215,10 @@ class LibraryStore {
 
   Future<void> archive(List<String> ids, bool archived) async {
     await _call('archive', {'ids': ids, 'archived': archived});
+  }
+
+  Future<void> setStarred(List<String> ids, bool starred) async {
+    await _call('star', {'ids': ids, 'starred': starred});
   }
 
   Future<void> deleteAssets(List<String> ids) async {
@@ -453,6 +460,7 @@ class _LibraryEngine {
       for (final (from, migration) in [
         (1, embeddingMigration),
         (2, excludedFromAllMigration),
+        (3, starredMigration),
       ]) {
         if (db.select('PRAGMA user_version').first.values.first != from) {
           continue;
@@ -572,6 +580,22 @@ class _LibraryEngine {
           for (final assetId in values['ids'] as List) {
             db.execute('UPDATE assets SET archived = ? WHERE id = ?', [
               values['archived'] == true ? 1 : 0,
+              assetId,
+            ]);
+          }
+          db.execute('COMMIT');
+        } catch (_) {
+          db.execute('ROLLBACK');
+          rethrow;
+        }
+        return null;
+      case 'star':
+        final values = args as Map;
+        db.execute('BEGIN IMMEDIATE');
+        try {
+          for (final assetId in values['ids'] as List) {
+            db.execute('UPDATE assets SET starred = ? WHERE id = ?', [
+              values['starred'] == true ? 1 : 0,
               assetId,
             ]);
           }
