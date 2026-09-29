@@ -28,6 +28,7 @@ import 'widgets/preview_details.dart';
 import 'widgets/gallery_drop_target.dart';
 import 'widgets/downloads_import_dialog.dart';
 import 'widgets/exact_masonry.dart';
+import 'widgets/view_breadcrumbs.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -99,6 +100,13 @@ class GalleryApp extends StatelessWidget {
           surface: AppColors.darker,
         ),
         scaffoldBackgroundColor: AppColors.lighter,
+        // Match the side panels; Material 3 otherwise tints the bar with the
+        // accent colour.
+        appBarTheme: const AppBarTheme(
+          backgroundColor: AppColors.darker,
+          surfaceTintColor: Colors.transparent,
+          scrolledUnderElevation: 0,
+        ),
         sliderTheme: const SliderThemeData(
           activeTrackColor: AppColors.accent,
           thumbColor: AppColors.accent,
@@ -2069,248 +2077,303 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                 ),
                 const VerticalDivider(width: 1),
                 Expanded(
-                  child: GalleryDropTarget(
-                    enabled: !_busy && !_closingWindow,
-                    onFiles: (files) {
-                      if (!_draggingOut) _run(() => _importImageFiles(files));
-                    },
-                    child: LayoutBuilder(
-                      builder: (context, constraints) {
-                        _onLayoutWidth(constraints.maxWidth);
-                        final width = _committedWidth > 0
-                            ? _committedWidth
-                            : constraints.maxWidth;
-                        final cols = _columnCount(width);
-
-                        if (_assets.isEmpty) {
-                          return Center(
-                            child: Text(
-                              _showArchived
-                                  ? 'No archived images'
-                                  : _tagFilter != null || _untagged
-                                  ? 'No images match this filter'
-                                  : 'Import images to fill this library',
-                              style: const TextStyle(color: Colors.white54),
-                            ),
-                          );
-                        }
-                        Widget grid;
-                        if (_pendingScrollOffset != null) {
-                          WidgetsBinding.instance.addPostFrameCallback(
-                            (_) => _restoreScrollPosition(),
-                          );
-                        }
-                        if (_layout == LayoutMode.masonry) {
-                          grid = ExactMasonryView(
-                            key: _gridKey,
-                            controller: _scrollController,
-                            columns: cols,
-                            spacing: 8,
-                            aspectRatios: [
-                              for (final asset in _assets)
-                                asset.width / asset.height,
-                            ],
-                            itemBuilder: (context, index) => GalleryTile(
-                              key: _tileKeys[_imagePaths[index]],
-                              path: _imagePaths[index],
-                              thumbnail: _thumbnailFor(_imagePaths[index]),
-                              aspectRatio:
-                                  _assets[index].width / _assets[index].height,
-                              filename: _assets[index].originalFilename,
-                              tileSize: _tileSize,
-                              layout: _layout,
-                              selected: _selectedPaths.contains(
-                                _imagePaths[index],
-                              ),
-                              onTap: () => _selectImage(_imagePaths[index]),
-                              onDoubleTap: _busy
-                                  ? null
-                                  : () => _openImageExternally(
-                                      _imagePaths[index],
-                                    ),
-                              onContextSelect: () =>
-                                  _selectContextImage(_imagePaths[index]),
-                              onCopyImage: _busy
-                                  ? null
-                                  : () => _copyImageToClipboard(
-                                      _imagePaths[index],
-                                    ),
-                              onEditTags: _busy ? null : _editSelectionTags,
-                              onArchive: _busy ? null : _archiveSelection,
-                              archived: _showArchived,
-                              onDelete: _busy ? null : _deleteSelection,
-                              onRefine: _busy ? null : _refineSelection,
-                              canRefine: _canRefineSelection,
-                              onClassify: _busy ? null : _classifySelection,
-                              onSimilar: _busy
-                                  ? null
-                                  : () => _findSimilar(_assets[index]),
-                              onTagDropped: _busy
-                                  ? null
-                                  : (tag) => _applyDroppedTag(
-                                      _imagePaths[index],
-                                      tag,
-                                    ),
-                              tagDropCount:
-                                  _selectedPaths.contains(_imagePaths[index])
-                                  ? _selectedPaths.length
-                                  : 1,
-                            ),
-                          );
-                        } else {
-                          grid = GridView.builder(
-                            key: _gridKey,
-                            controller: _scrollController,
-                            itemCount: _imagePaths.length,
-                            gridDelegate:
-                                SliverGridDelegateWithMaxCrossAxisExtent(
-                                  maxCrossAxisExtent: _tileSize,
-                                  mainAxisSpacing: 8,
-                                  crossAxisSpacing: 8,
-                                ),
-                            itemBuilder: (context, index) => GalleryTile(
-                              key: _tileKeys[_imagePaths[index]],
-                              path: _imagePaths[index],
-                              thumbnail: _thumbnailFor(_imagePaths[index]),
-                              aspectRatio:
-                                  _assets[index].width / _assets[index].height,
-                              filename: _assets[index].originalFilename,
-                              tileSize: _tileSize,
-                              layout: _layout,
-                              selected: _selectedPaths.contains(
-                                _imagePaths[index],
-                              ),
-                              onTap: () => _selectImage(_imagePaths[index]),
-                              onDoubleTap: _busy
-                                  ? null
-                                  : () => _openImageExternally(
-                                      _imagePaths[index],
-                                    ),
-                              onContextSelect: () =>
-                                  _selectContextImage(_imagePaths[index]),
-                              onCopyImage: _busy
-                                  ? null
-                                  : () => _copyImageToClipboard(
-                                      _imagePaths[index],
-                                    ),
-                              onEditTags: _busy ? null : _editSelectionTags,
-                              onArchive: _busy ? null : _archiveSelection,
-                              archived: _showArchived,
-                              onDelete: _busy ? null : _deleteSelection,
-                              onRefine: _busy ? null : _refineSelection,
-                              canRefine: _canRefineSelection,
-                              onClassify: _busy ? null : _classifySelection,
-                              onSimilar: _busy
-                                  ? null
-                                  : () => _findSimilar(_assets[index]),
-                              onTagDropped: _busy
-                                  ? null
-                                  : (tag) => _applyDroppedTag(
-                                      _imagePaths[index],
-                                      tag,
-                                    ),
-                              tagDropCount:
-                                  _selectedPaths.contains(_imagePaths[index])
-                                  ? _selectedPaths.length
-                                  : 1,
-                            ),
-                          );
-                        }
-
-                        return Focus(
-                          focusNode: _galleryFocus,
-                          onKeyEvent: (node, event) {
-                            if (event is KeyDownEvent &&
-                                event.logicalKey == LogicalKeyboardKey.delete &&
-                                !_busy &&
-                                _selectedPaths.isNotEmpty) {
-                              _deleteSelection();
-                              return KeyEventResult.handled;
+                  child: Column(
+                    children: [
+                      ViewBreadcrumbs(
+                        tags: _tags,
+                        view: _showArchived
+                            ? LibraryView.archived
+                            : _untagged
+                            ? LibraryView.untagged
+                            : LibraryView.all,
+                        tagId: _tagFilter,
+                        onView: _busy ? null : (view) => _setFilter(view),
+                        onTag: _busy
+                            ? null
+                            : (id) => _setFilter(LibraryView.all, id),
+                      ),
+                      Expanded(
+                        child: GalleryDropTarget(
+                          enabled: !_busy && !_closingWindow,
+                          onFiles: (files) {
+                            if (!_draggingOut) {
+                              _run(() => _importImageFiles(files));
                             }
-                            return KeyEventResult.ignored;
                           },
-                          child: ScrollConfiguration(
-                            behavior: _GalleryScrollBehavior(),
-                            child: Scrollbar(
-                              controller: _scrollController,
-                              thumbVisibility: true,
-                              interactive: true,
-                              scrollbarOrientation: ScrollbarOrientation.right,
-                              thickness: 8,
-                              radius: const Radius.circular(4),
-                              child: Padding(
-                                padding: const EdgeInsets.only(right: 20),
-                                // Keep scrollbar drags outside selection hit testing.
-                                child: Listener(
-                                  onPointerDown: (e) {
-                                    final keys = HardwareKeyboard.instance;
-                                    _toggleOnTap =
-                                        keys.isControlPressed ||
-                                        keys.isMetaPressed;
-                                    // Left button only, not the scroll wheel.
-                                    if (_busy ||
-                                        e.kind != PointerDeviceKind.mouse ||
-                                        e.buttons != kPrimaryMouseButton) {
-                                      return;
-                                    }
-                                    _galleryFocus.requestFocus();
-                                    if (keys.isAltPressed) {
-                                      setState(() {
-                                        _dragStart = e.localPosition;
-                                        _dragCurrent = e.localPosition;
-                                      });
-                                    } else {
-                                      _fileDragOrigin = e.localPosition;
-                                      _fileDragPath = _tileAt(e.localPosition);
-                                    }
-                                  },
-                                  onPointerMove: (e) {
-                                    if (_dragStart != null) {
-                                      setState(
-                                        () => _dragCurrent = e.localPosition,
-                                      );
-                                      _updateMarqueeSelection();
-                                    } else if (_fileDragPath != null &&
-                                        (e.localPosition - _fileDragOrigin!)
-                                                .distance >
-                                            kTouchSlop / 3) {
-                                      final path = _fileDragPath!;
-                                      _fileDragPath = _fileDragOrigin = null;
-                                      _startFileDrag(path);
-                                    }
-                                  },
-                                  onPointerUp: (_) => setState(() {
-                                    _dragStart = null;
-                                    _dragCurrent = null;
-                                    _fileDragPath = _fileDragOrigin = null;
-                                  }),
-                                  onPointerCancel: (_) => setState(() {
-                                    _dragStart = null;
-                                    _dragCurrent = null;
-                                    _fileDragPath = _fileDragOrigin = null;
-                                  }),
-                                  child: Stack(
-                                    children: [
-                                      grid,
-                                      if (_selectionRect != null)
-                                        Positioned.fill(
-                                          child: IgnorePointer(
-                                            child: CustomPaint(
-                                              painter: _MarqueePainter(
-                                                _selectionRect!,
-                                              ),
-                                            ),
+                          child: LayoutBuilder(
+                            builder: (context, constraints) {
+                              _onLayoutWidth(constraints.maxWidth);
+                              final width = _committedWidth > 0
+                                  ? _committedWidth
+                                  : constraints.maxWidth;
+                              final cols = _columnCount(width);
+
+                              if (_assets.isEmpty) {
+                                return Center(
+                                  child: Text(
+                                    _showArchived
+                                        ? 'No archived images'
+                                        : _tagFilter != null || _untagged
+                                        ? 'No images match this filter'
+                                        : 'Import images to fill this library',
+                                    style: const TextStyle(
+                                      color: Colors.white54,
+                                    ),
+                                  ),
+                                );
+                              }
+                              Widget grid;
+                              if (_pendingScrollOffset != null) {
+                                WidgetsBinding.instance.addPostFrameCallback(
+                                  (_) => _restoreScrollPosition(),
+                                );
+                              }
+                              if (_layout == LayoutMode.masonry) {
+                                grid = ExactMasonryView(
+                                  key: _gridKey,
+                                  controller: _scrollController,
+                                  columns: cols,
+                                  spacing: 8,
+                                  aspectRatios: [
+                                    for (final asset in _assets)
+                                      asset.width / asset.height,
+                                  ],
+                                  itemBuilder: (context, index) => GalleryTile(
+                                    key: _tileKeys[_imagePaths[index]],
+                                    path: _imagePaths[index],
+                                    thumbnail: _thumbnailFor(
+                                      _imagePaths[index],
+                                    ),
+                                    aspectRatio:
+                                        _assets[index].width /
+                                        _assets[index].height,
+                                    filename: _assets[index].originalFilename,
+                                    tileSize: _tileSize,
+                                    layout: _layout,
+                                    selected: _selectedPaths.contains(
+                                      _imagePaths[index],
+                                    ),
+                                    onTap: () =>
+                                        _selectImage(_imagePaths[index]),
+                                    onDoubleTap: _busy
+                                        ? null
+                                        : () => _openImageExternally(
+                                            _imagePaths[index],
                                           ),
+                                    onContextSelect: () =>
+                                        _selectContextImage(_imagePaths[index]),
+                                    onCopyImage: _busy
+                                        ? null
+                                        : () => _copyImageToClipboard(
+                                            _imagePaths[index],
+                                          ),
+                                    onEditTags: _busy
+                                        ? null
+                                        : _editSelectionTags,
+                                    onArchive: _busy ? null : _archiveSelection,
+                                    archived: _showArchived,
+                                    onDelete: _busy ? null : _deleteSelection,
+                                    onRefine: _busy ? null : _refineSelection,
+                                    canRefine: _canRefineSelection,
+                                    onClassify: _busy
+                                        ? null
+                                        : _classifySelection,
+                                    onSimilar: _busy
+                                        ? null
+                                        : () => _findSimilar(_assets[index]),
+                                    onTagDropped: _busy
+                                        ? null
+                                        : (tag) => _applyDroppedTag(
+                                            _imagePaths[index],
+                                            tag,
+                                          ),
+                                    tagDropCount:
+                                        _selectedPaths.contains(
+                                          _imagePaths[index],
+                                        )
+                                        ? _selectedPaths.length
+                                        : 1,
+                                  ),
+                                );
+                              } else {
+                                grid = GridView.builder(
+                                  key: _gridKey,
+                                  controller: _scrollController,
+                                  itemCount: _imagePaths.length,
+                                  gridDelegate:
+                                      SliverGridDelegateWithMaxCrossAxisExtent(
+                                        maxCrossAxisExtent: _tileSize,
+                                        mainAxisSpacing: 8,
+                                        crossAxisSpacing: 8,
+                                      ),
+                                  itemBuilder: (context, index) => GalleryTile(
+                                    key: _tileKeys[_imagePaths[index]],
+                                    path: _imagePaths[index],
+                                    thumbnail: _thumbnailFor(
+                                      _imagePaths[index],
+                                    ),
+                                    aspectRatio:
+                                        _assets[index].width /
+                                        _assets[index].height,
+                                    filename: _assets[index].originalFilename,
+                                    tileSize: _tileSize,
+                                    layout: _layout,
+                                    selected: _selectedPaths.contains(
+                                      _imagePaths[index],
+                                    ),
+                                    onTap: () =>
+                                        _selectImage(_imagePaths[index]),
+                                    onDoubleTap: _busy
+                                        ? null
+                                        : () => _openImageExternally(
+                                            _imagePaths[index],
+                                          ),
+                                    onContextSelect: () =>
+                                        _selectContextImage(_imagePaths[index]),
+                                    onCopyImage: _busy
+                                        ? null
+                                        : () => _copyImageToClipboard(
+                                            _imagePaths[index],
+                                          ),
+                                    onEditTags: _busy
+                                        ? null
+                                        : _editSelectionTags,
+                                    onArchive: _busy ? null : _archiveSelection,
+                                    archived: _showArchived,
+                                    onDelete: _busy ? null : _deleteSelection,
+                                    onRefine: _busy ? null : _refineSelection,
+                                    canRefine: _canRefineSelection,
+                                    onClassify: _busy
+                                        ? null
+                                        : _classifySelection,
+                                    onSimilar: _busy
+                                        ? null
+                                        : () => _findSimilar(_assets[index]),
+                                    onTagDropped: _busy
+                                        ? null
+                                        : (tag) => _applyDroppedTag(
+                                            _imagePaths[index],
+                                            tag,
+                                          ),
+                                    tagDropCount:
+                                        _selectedPaths.contains(
+                                          _imagePaths[index],
+                                        )
+                                        ? _selectedPaths.length
+                                        : 1,
+                                  ),
+                                );
+                              }
+
+                              return Focus(
+                                focusNode: _galleryFocus,
+                                onKeyEvent: (node, event) {
+                                  if (event is KeyDownEvent &&
+                                      event.logicalKey ==
+                                          LogicalKeyboardKey.delete &&
+                                      !_busy &&
+                                      _selectedPaths.isNotEmpty) {
+                                    _deleteSelection();
+                                    return KeyEventResult.handled;
+                                  }
+                                  return KeyEventResult.ignored;
+                                },
+                                child: ScrollConfiguration(
+                                  behavior: _GalleryScrollBehavior(),
+                                  child: Scrollbar(
+                                    controller: _scrollController,
+                                    thumbVisibility: true,
+                                    interactive: true,
+                                    scrollbarOrientation:
+                                        ScrollbarOrientation.right,
+                                    thickness: 8,
+                                    radius: const Radius.circular(4),
+                                    child: Padding(
+                                      padding: const EdgeInsets.only(right: 20),
+                                      // Keep scrollbar drags outside selection hit testing.
+                                      child: Listener(
+                                        onPointerDown: (e) {
+                                          final keys =
+                                              HardwareKeyboard.instance;
+                                          _toggleOnTap =
+                                              keys.isControlPressed ||
+                                              keys.isMetaPressed;
+                                          // Left button only, not the scroll wheel.
+                                          if (_busy ||
+                                              e.kind !=
+                                                  PointerDeviceKind.mouse ||
+                                              e.buttons !=
+                                                  kPrimaryMouseButton) {
+                                            return;
+                                          }
+                                          _galleryFocus.requestFocus();
+                                          if (keys.isAltPressed) {
+                                            setState(() {
+                                              _dragStart = e.localPosition;
+                                              _dragCurrent = e.localPosition;
+                                            });
+                                          } else {
+                                            _fileDragOrigin = e.localPosition;
+                                            _fileDragPath = _tileAt(
+                                              e.localPosition,
+                                            );
+                                          }
+                                        },
+                                        onPointerMove: (e) {
+                                          if (_dragStart != null) {
+                                            setState(
+                                              () => _dragCurrent =
+                                                  e.localPosition,
+                                            );
+                                            _updateMarqueeSelection();
+                                          } else if (_fileDragPath != null &&
+                                              (e.localPosition -
+                                                          _fileDragOrigin!)
+                                                      .distance >
+                                                  kTouchSlop / 3) {
+                                            final path = _fileDragPath!;
+                                            _fileDragPath = _fileDragOrigin =
+                                                null;
+                                            _startFileDrag(path);
+                                          }
+                                        },
+                                        onPointerUp: (_) => setState(() {
+                                          _dragStart = null;
+                                          _dragCurrent = null;
+                                          _fileDragPath = _fileDragOrigin =
+                                              null;
+                                        }),
+                                        onPointerCancel: (_) => setState(() {
+                                          _dragStart = null;
+                                          _dragCurrent = null;
+                                          _fileDragPath = _fileDragOrigin =
+                                              null;
+                                        }),
+                                        child: Stack(
+                                          children: [
+                                            grid,
+                                            if (_selectionRect != null)
+                                              Positioned.fill(
+                                                child: IgnorePointer(
+                                                  child: CustomPaint(
+                                                    painter: _MarqueePainter(
+                                                      _selectionRect!,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
                                         ),
-                                    ],
+                                      ),
+                                    ),
                                   ),
                                 ),
-                              ),
-                            ),
+                              );
+                            },
                           ),
-                        );
-                      },
-                    ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 if (_previewVisible) ...[
@@ -2375,11 +2438,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                   ? null
                                   : _openPreviewExternally,
                             ),
-                            SelectionTags(
-                              tags: _tags,
-                              assets: _selection,
-                              onEdit: _busy ? null : _editSelectionTags,
-                            ),
+                            SelectionTags(tags: _tags, assets: _selection),
                           ],
                         ],
                       ),

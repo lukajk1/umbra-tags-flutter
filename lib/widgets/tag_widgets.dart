@@ -45,8 +45,9 @@ List<List<bool>> tagTreeGuides(List<int> depths) {
       () {
         final depth = depths[i];
         // Keep ancestors' entries, replace this depth's with this row's.
-        if (continuing.length > depth)
+        if (continuing.length > depth) {
           continuing.removeRange(depth, continuing.length);
+        }
         while (continuing.length < depth) {
           continuing.add(false);
         }
@@ -732,15 +733,9 @@ class _BatchTagsDialogState extends State<BatchTagsDialog> {
 }
 
 class SelectionTags extends StatelessWidget {
-  const SelectionTags({
-    super.key,
-    required this.tags,
-    required this.assets,
-    required this.onEdit,
-  });
+  const SelectionTags({super.key, required this.tags, required this.assets});
   final List<LibraryTag> tags;
   final List<LibraryAsset> assets;
-  final VoidCallback? onEdit;
   @override
   Widget build(BuildContext context) {
     final assigned = [
@@ -757,11 +752,9 @@ class SelectionTags extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              const Expanded(child: Text('Tags')),
-              TextButton(onPressed: onEdit, child: const Text('Edit tags')),
-            ],
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: Text('Tags'),
           ),
           Flexible(
             child: SingleChildScrollView(

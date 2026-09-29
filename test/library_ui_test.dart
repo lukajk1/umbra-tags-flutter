@@ -117,7 +117,9 @@ void main() {
           find.byType(TagDetailsDialog).evaluate().isEmpty &&
           find.byType(CircularProgressIndicator).evaluate().isEmpty,
     );
-    await tester.tap(find.text('Edit tags'));
+    await tester.tap(find.text('Edit'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edit tags…'));
     await _until(
       tester,
       () => find.byType(BatchTagsDialog).evaluate().isNotEmpty,

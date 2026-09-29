@@ -89,8 +89,8 @@ Rename / Move, and Delete. Deletion removes that tag's assignments and moves its
 children to its parent; it never deletes images. Tag names are globally unique
 within the library (ASCII case insensitive).
 
-Select images with click, Ctrl/Cmd-click, or Alt + drag for a selection box, then choose **Edit
-tags** below the preview or **Edit → Edit tags…**. A dash means some selected images
+Select images with click, Ctrl/Cmd-click, or Alt + drag for a selection box, then choose **Edit →
+Edit tags…** or **Edit tags…** from an image's right-click menu. A dash means some selected images
 have the tag. Changes apply to the whole selection; untouched assignments remain.
 
 Drag an image without Alt to drop it, or the whole selection when it is part of
