@@ -160,6 +160,7 @@ class TagSidebar extends StatefulWidget {
     required this.onEdit,
     required this.onDelete,
     this.onFindMatches,
+    this.onToggleExcluded,
   });
   final List<LibraryTag> tags;
   final LibraryView view;
@@ -170,6 +171,9 @@ class TagSidebar extends StatefulWidget {
   final ValueChanged<String?> onCreate;
   final ValueChanged<LibraryTag> onEdit, onDelete;
   final ValueChanged<LibraryTag>? onFindMatches;
+
+  /// Toggles whether the tag's images are left out of All images.
+  final ValueChanged<LibraryTag>? onToggleExcluded;
   @override
   State<TagSidebar> createState() => _TagSidebarState();
 }
@@ -181,11 +185,21 @@ class _TagSidebarState extends State<TagSidebar> {
     if (action == 'edit') widget.onEdit(tag);
     if (action == 'delete') widget.onDelete(tag);
     if (action == 'match') widget.onFindMatches?.call(tag);
+    if (action == 'exclude') widget.onToggleExcluded?.call(tag);
   }
 
-  List<PopupMenuEntry<String>> _menuItems() => [
+  List<PopupMenuEntry<String>> _menuItems(LibraryTag tag) => [
     if (widget.onFindMatches != null)
       const PopupMenuItem(value: 'match', child: Text('Find matching images…')),
+    if (widget.onToggleExcluded != null)
+      PopupMenuItem(
+        value: 'exclude',
+        child: Text(
+          tag.excludedFromAll
+              ? 'Show in All images'
+              : 'Exclude from All images',
+        ),
+      ),
     PopupMenuItem(value: 'child', child: Text('Add child tag')),
     PopupMenuItem(value: 'edit', child: Text('Rename / move')),
     PopupMenuItem(value: 'delete', child: Text('Delete tag')),
@@ -292,7 +306,7 @@ class _TagSidebarState extends State<TagSidebar> {
                                       ),
                                       Offset.zero & overlay.size,
                                     ),
-                                    items: _menuItems(),
+                                    items: _menuItems(row.tag),
                                   );
                                   if (mounted &&
                                       !widget.busy &&
@@ -314,10 +328,15 @@ class _TagSidebarState extends State<TagSidebar> {
                                     12 +
                                     (row.depth * 12).clamp(0, 60).toDouble(),
                               ),
-                              leading: const Icon(
-                                Icons.label_outline,
-                                size: 18,
-                              ),
+                              leading: row.tag.excludedFromAll
+                                  ? const Tooltip(
+                                      message: 'Excluded from All images',
+                                      child: Icon(
+                                        Icons.visibility_off_outlined,
+                                        size: 18,
+                                      ),
+                                    )
+                                  : const Icon(Icons.label_outline, size: 18),
                               minLeadingWidth: 16,
                               title: Tooltip(
                                 message: row.tag.name,
@@ -347,7 +366,7 @@ class _TagSidebarState extends State<TagSidebar> {
                                 icon: const Icon(Icons.more_vert, size: 18),
                                 onSelected: (action) =>
                                     _tagAction(action, row.tag),
-                                itemBuilder: (_) => _menuItems(),
+                                itemBuilder: (_) => _menuItems(row.tag),
                               ),
                             ),
                           ),

@@ -112,6 +112,33 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('2 selected  '), findsOneWidget);
 
+    Future<void> click(int index, List<LogicalKeyboardKey> keys) async {
+      for (final key in keys) {
+        await tester.sendKeyDownEvent(key);
+      }
+      await tester.tap(tiles.at(index), kind: PointerDeviceKind.mouse);
+      for (final key in keys) {
+        await tester.sendKeyUpEvent(key);
+      }
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+
+    // Shift-click selects the range from the last plain click, replacing.
+    await click(1, []);
+    await click(3, [LogicalKeyboardKey.shiftLeft]);
+    expect(find.text('3 selected  '), findsOneWidget);
+    // The anchor stays put: Shift-click in the other direction.
+    await click(0, [LogicalKeyboardKey.shiftLeft]);
+    expect(find.text('2 selected  '), findsOneWidget);
+    // Ctrl+Shift adds a range to the existing selection.
+    await click(3, []);
+    await click(1, [LogicalKeyboardKey.controlLeft]);
+    await click(0, [
+      LogicalKeyboardKey.controlLeft,
+      LogicalKeyboardKey.shiftLeft,
+    ]);
+    expect(find.text('3 selected  '), findsOneWidget);
+
     await tester.tap(find.text('File'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Close library'));

@@ -1,7 +1,7 @@
 // Public, language-independent library format. See LIBRARY_FORMAT.md.
 const libraryFormat = 'umbra-tags-library';
 const libraryFormatVersion = 1;
-const librarySchemaVersion = 2;
+const librarySchemaVersion = 3;
 
 const createSchema =
     '''
@@ -39,6 +39,7 @@ CREATE TABLE tags (
   group_id TEXT REFERENCES tag_groups(id) ON DELETE SET NULL,
   pinned INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0, 1)),
   position INTEGER NOT NULL DEFAULT 0,
+  excluded_from_all INTEGER NOT NULL DEFAULT 0 CHECK(excluded_from_all IN (0, 1)),
   CHECK(parent_id IS NULL OR parent_id != id)
 );
 CREATE INDEX tags_parent ON tags(parent_id);
@@ -70,7 +71,21 @@ CREATE TABLE jobs (
   updated_at INTEGER NOT NULL
 );
 $embeddingSchema
+PRAGMA user_version = 3;
+''';
+
+// Additive v1 -> v2 migration: similarity embeddings.
+const embeddingMigration =
+    '''
+$embeddingSchema
 PRAGMA user_version = 2;
+''';
+
+// Additive v2 -> v3 migration: tags hidden from the All images view.
+const excludedFromAllMigration = '''
+ALTER TABLE tags ADD COLUMN
+  excluded_from_all INTEGER NOT NULL DEFAULT 0 CHECK(excluded_from_all IN (0, 1));
+PRAGMA user_version = 3;
 ''';
 
 // Additive v1 -> v2 migration; originals and existing metadata are unchanged.

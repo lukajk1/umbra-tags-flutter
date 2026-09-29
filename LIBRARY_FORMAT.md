@@ -6,7 +6,7 @@ This is a new format; legacy Calypso saves are deliberately not supported.
 
 ```
 library.json             # format identity (UTF-8 JSON)
-catalog.sqlite           # authoritative metadata, SQLite user_version = 2
+catalog.sqlite           # authoritative metadata, SQLite user_version = 3
 media/<id-prefix>/<id>.<ext>
 cache/thumbnails/<id>-<sha256>-v2.jpg
 cache/previews/          # reserved, rebuildable
@@ -35,8 +35,10 @@ Creating an independent fork would require a future explicit operation.
 converter. UUIDs are text. All timestamps are UTC milliseconds since the Unix epoch.
 Booleans are constrained SQLite integers, 0 or 1. Enable `PRAGMA foreign_keys=ON`
 on every connection. Format and database versions are checked independently; unknown
-versions are rejected. Catalog v1 is upgraded transactionally to v2 after a
-metadata backup is saved as `backups/catalog-before-v2-<timestamp>.sqlite`. The manifest ID must match the sole library row.
+versions are rejected. Older catalogs are upgraded transactionally one version at
+a time (v1 to v2, v2 to v3), each after a metadata backup is saved as
+`backups/catalog-before-v<new version>-<timestamp>.sqlite`. Upgraded catalogs
+cannot be opened by app versions that predate the new schema. The manifest ID must match the sole library row.
 
 * `assets`: one record per original, with portable path, original filename, MIME type,
   dimensions after EXIF orientation, byte size, import/source dates, exact SHA-256,
@@ -44,6 +46,8 @@ metadata backup is saved as `backups/catalog-before-v2-<timestamp>.sqlite`. The 
 * `tag_groups`, `tags`, `asset_tags`: normalized organization. Tag hierarchy uses
   parent IDs; children and depth are derived. Tag operations
   prevent multi-node cycles. SQLite NOCASE uniqueness is ASCII case insensitive.
+  `tags.excluded_from_all` (catalog v3) hides images carrying that tag, or any of
+  its descendants, from the All images view only.
 * `predictions`: model/version, label, confidence, analyzed content hash, and date.
   Suggestions are separate from confirmed tags. Local classifiers save all scores,
   recording the checkpoint SHA-256 as the model version. The optional best-label

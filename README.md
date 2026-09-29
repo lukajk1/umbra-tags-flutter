@@ -89,9 +89,15 @@ Rename / Move, and Delete. Deletion removes that tag's assignments and moves its
 children to its parent; it never deletes images. Tag names are globally unique
 within the library (ASCII case insensitive).
 
-Select images with click, Ctrl/Cmd-click, or Alt + drag for a selection box, then choose **Edit →
+Select images with click, Ctrl/Cmd-click, Shift-click for a range in gallery order
+(Ctrl+Shift adds the range), or Alt + drag for a selection box, then choose **Edit →
 Edit tags…** or **Edit tags…** from an image's right-click menu. A dash means some selected images
 have the tag. Changes apply to the whole selection; untouched assignments remain.
+
+A tag's ⋮ menu offers **Exclude from All images**: images with that tag or its
+children are then left out of All images (the tag shows an eye-slash icon), while
+its own tag view, Untagged and Archived are unchanged. Choose **Show in All
+images** to undo it. This setting needs catalog v3; libraries upgrade on open.
 
 Drag an image without Alt to drop it, or the whole selection when it is part of
 one, into other applications as files (Explorer, chat apps, browser uploads).

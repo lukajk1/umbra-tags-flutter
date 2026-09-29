@@ -169,6 +169,10 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
   // so their tap callback runs only after the double-click window, by which
   // time a quick Ctrl-click has usually released the key.
   bool _toggleOnTap = false;
+  // Shift at pointer down selects a range, in gallery order, from the anchor:
+  // the image last clicked without Shift.
+  bool _rangeOnTap = false;
+  String? _selectionAnchor;
   static const _dragChannel = MethodChannel('umbra_tags/drag');
   final _gridKey = GlobalKey();
   final _scrollController = ScrollController();
@@ -919,6 +923,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       archived: _showArchived,
       untagged: _untagged,
       tagId: _tagFilter,
+      excludeHidden: !_showArchived && !_untagged,
     );
     if (!mounted) return;
     setState(() {
@@ -1358,6 +1363,18 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     await _reload();
   });
 
+  void _toggleTagExcluded(LibraryTag tag) => _run(() async {
+    await _library!.setTagExcludedFromAll(tag.id, !tag.excludedFromAll);
+    await _reload();
+    if (mounted) {
+      setState(
+        () => _status = tag.excludedFromAll
+            ? '“${tag.name}” images are shown in All images again'
+            : '“${tag.name}” images are hidden from All images',
+      );
+    }
+  });
+
   void _findTagMatches(LibraryTag tag) => _run(() async {
     final library = _library;
     if (library == null) return;
@@ -1434,6 +1451,22 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     if (_busy) return;
     _galleryFocus.requestFocus();
     setState(() {
+      final from = _selectionAnchor == null
+          ? -1
+          : _imagePaths.indexOf(_selectionAnchor!);
+      final to = _imagePaths.indexOf(path);
+      if (_rangeOnTap && from >= 0 && to >= 0) {
+        // Ctrl+Shift adds the range to the selection; Shift alone replaces it.
+        if (!_toggleOnTap) _selectedPaths.clear();
+        _selectedPaths.addAll(
+          _imagePaths.sublist(
+            from < to ? from : to,
+            (from < to ? to : from) + 1,
+          ),
+        );
+        return;
+      }
+      _selectionAnchor = path;
       if (_toggleOnTap) {
         if (!_selectedPaths.add(path)) _selectedPaths.remove(path);
       } else {
@@ -1448,6 +1481,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     if (_busy) return;
     _galleryFocus.requestFocus();
     if (!_selectedPaths.contains(path)) {
+      _selectionAnchor = path;
       setState(
         () => _selectedPaths
           ..clear()
@@ -2074,6 +2108,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                   onEdit: (tag) => _editTag(tag: tag),
                   onDelete: _deleteTag,
                   onFindMatches: _findTagMatches,
+                  onToggleExcluded: _toggleTagExcluded,
                 ),
                 const VerticalDivider(width: 1),
                 Expanded(
@@ -2298,6 +2333,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                           _toggleOnTap =
                                               keys.isControlPressed ||
                                               keys.isMetaPressed;
+                                          _rangeOnTap = keys.isShiftPressed;
                                           // Left button only, not the scroll wheel.
                                           if (_busy ||
                                               e.kind !=
@@ -2608,12 +2644,18 @@ class GalleryTile extends StatelessWidget {
           enabled: onCopyImage != null,
           child: const Text('Copy image to clipboard'),
         ),
-        const PopupMenuItem(value: 'copy', child: Text('Copy file path')),
         PopupMenuItem(
           value: 'tags',
           enabled: onEditTags != null,
-          child: const Text('Edit tags…'),
+          child: const Row(
+            children: [
+              Icon(Icons.label_outline, size: 18),
+              SizedBox(width: 10),
+              Text('Edit tags…'),
+            ],
+          ),
         ),
+        const PopupMenuItem(value: 'copy', child: Text('Copy file path')),
         const PopupMenuItem(value: 'info', child: Text('Image info')),
         PopupMenuItem(
           value: 'similar',

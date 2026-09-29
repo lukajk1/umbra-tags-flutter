@@ -6,9 +6,13 @@ class LibraryTag {
     : id = row['id'] as String,
       name = row['name'] as String,
       parentId = row['parent_id'] as String?,
-      assetCount = row['asset_count'] as int? ?? 0;
+      assetCount = row['asset_count'] as int? ?? 0,
+      excludedFromAll = row['excluded_from_all'] == 1;
   final String id, name;
   final String? parentId;
+
+  /// Images with this tag or a descendant are left out of All images.
+  final bool excludedFromAll;
 
   /// Non-archived images shown in this tag's view: those with the tag or any
   /// of its descendants.
@@ -35,7 +39,8 @@ class TagRepository {
           JOIN assets a ON a.id = at.asset_id AND a.archived = 0
           GROUP BY tree.root
         )
-        SELECT t.id,t.name,t.parent_id,COALESCE(c.n, 0) AS asset_count
+        SELECT t.id,t.name,t.parent_id,t.excluded_from_all,
+          COALESCE(c.n, 0) AS asset_count
         FROM tags t LEFT JOIN counts c ON c.root = t.id
         ORDER BY t.name COLLATE NOCASE,t.id''')
       .map((r) => Map<String, Object?>.from(r))
@@ -127,14 +132,33 @@ class TagRepository {
     });
   }
 
+  void setExcludedFromAll(String id, bool excluded) {
+    _requireTag(id);
+    db.execute('UPDATE tags SET excluded_from_all = ? WHERE id = ?', [
+      excluded ? 1 : 0,
+      id,
+    ]);
+  }
+
   List<Map<String, Object?>> assets(Map args) {
     final tagId = args['tagId'] as String?;
+    final excludeHidden = args['excludeHidden'] == true && tagId == null;
     final parameters = <Object?>[?tagId, args['archived'] == true ? 1 : 0];
+    // Tags excluded from All images, with their descendants.
+    const excluded = '''WITH RECURSIVE excluded(id) AS (
+      SELECT id FROM tags WHERE excluded_from_all = 1
+      UNION SELECT t.id FROM tags t JOIN excluded e ON t.parent_id = e.id
+    )''';
     final query =
-        '''${tagId == null ? '' : descendants}
+        '''${tagId != null
+            ? descendants
+            : excludeHidden
+            ? excluded
+            : ''}
       SELECT a.* FROM assets a WHERE a.archived = ?
       ${args['untagged'] == true ? 'AND NOT EXISTS (SELECT 1 FROM asset_tags at WHERE at.asset_id = a.id)' : ''}
       ${tagId == null ? '' : 'AND EXISTS (SELECT 1 FROM asset_tags at JOIN descendants d ON d.id = at.tag_id WHERE at.asset_id = a.id)'}
+      ${excludeHidden ? 'AND NOT EXISTS (SELECT 1 FROM asset_tags at JOIN excluded e ON e.id = at.tag_id WHERE at.asset_id = a.id)' : ''}
       ORDER BY a.imported_at DESC,a.id''';
     final result = db
         .select(query, parameters)

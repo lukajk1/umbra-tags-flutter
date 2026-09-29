@@ -135,15 +135,20 @@ class LibraryStore {
   }
 
   String absolutePath(String relative) => _resolve(root, relative);
+
+  /// [excludeHidden] leaves out images whose tags are excluded from All
+  /// images; it applies only without a [tagId].
   Future<List<LibraryAsset>> assets({
     bool archived = false,
     bool untagged = false,
     String? tagId,
+    bool excludeHidden = false,
   }) async =>
       (await _call('assets', {
                 'archived': archived,
                 'untagged': untagged,
                 'tagId': tagId,
+                'excludeHidden': excludeHidden,
               })
               as List)
           .map(
@@ -225,6 +230,10 @@ class LibraryStore {
   }) async =>
       await _call('saveTag', {'id': id, 'name': name, 'parentId': parentId})
           as String;
+  Future<void> setTagExcludedFromAll(String id, bool excluded) async {
+    await _call('setTagExcluded', {'id': id, 'excluded': excluded});
+  }
+
   Future<void> deleteTag(String id) async {
     await _call('deleteTag', id);
   }
@@ -428,7 +437,7 @@ class _LibraryEngine {
         }
         _db = sqlite3.open(path('catalog.sqlite'), mode: OpenMode.readWrite);
         final version = _db!.select('PRAGMA user_version').first.values.first;
-        if (version != 1 && version != librarySchemaVersion) {
+        if (version is! int || version < 1 || version > librarySchemaVersion) {
           throw LibraryException(
             'Unsupported catalog schema $version. No migration was performed.',
           );
@@ -440,15 +449,21 @@ class _LibraryEngine {
         name = rows.first['name'] as String;
         _ensureDirectories();
       }
-      if (db.select('PRAGMA user_version').first.values.first == 1) {
+      // Additive upgrades, each after a metadata backup, one version at a time.
+      for (final (from, migration) in [
+        (1, embeddingMigration),
+        (2, excludedFromAllMigration),
+      ]) {
+        if (db.select('PRAGMA user_version').first.values.first != from) {
+          continue;
+        }
         final backup = path(
-          'backups/catalog-before-v2-${DateTime.now().toUtc().microsecondsSinceEpoch}.sqlite',
+          'backups/catalog-before-v${from + 1}-${DateTime.now().toUtc().microsecondsSinceEpoch}.sqlite',
         );
         db.execute('VACUUM INTO ?', [backup]);
         db.execute('BEGIN IMMEDIATE');
         try {
-          db.execute(embeddingSchema);
-          db.execute('PRAGMA user_version = 2');
+          db.execute(migration);
           db.execute('COMMIT');
         } catch (_) {
           db.execute('ROLLBACK');
@@ -519,6 +534,13 @@ class _LibraryEngine {
           name: values['name'] as String,
           parentId: values['parentId'] as String?,
         );
+      case 'setTagExcluded':
+        final values = args as Map;
+        TagRepository(db).setExcludedFromAll(
+          values['id'] as String,
+          values['excluded'] as bool,
+        );
+        return null;
       case 'deleteTag':
         TagRepository(db).delete(args as String);
         return null;

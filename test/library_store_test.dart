@@ -60,6 +60,58 @@ void main() {
     },
   );
 
+  test('excluded tags hide their images from All images only', () async {
+    final store = await create();
+    final parent = await store.saveTag(name: 'Parent');
+    final child = await store.saveTag(name: 'Child', parentId: parent);
+    final a = (await store.importImage((await picture('a.png')).path)).asset;
+    final b = (await store.importImage(
+      (await picture('b.png', width: 31)).path,
+    )).asset;
+    await store.importImage((await picture('c.png', width: 32)).path);
+    await store.editTags([a.id], add: [parent]);
+    await store.editTags([b.id], add: [child]);
+
+    await store.setTagExcludedFromAll(parent, true);
+    final tags = {for (final tag in await store.tags()) tag.name: tag};
+    expect(tags['Parent']!.excludedFromAll, isTrue);
+    expect(tags['Child']!.excludedFromAll, isFalse);
+    // Excluding a parent also hides images tagged with its children.
+    expect(await store.assets(excludeHidden: true), hasLength(1));
+    expect(await store.assets(), hasLength(3));
+    expect(
+      await store.assets(tagId: parent, excludeHidden: true),
+      hasLength(2),
+    );
+
+    await store.setTagExcludedFromAll(parent, false);
+    expect(await store.assets(excludeHidden: true), hasLength(3));
+  });
+
+  test('catalog v2 libraries upgrade to v3 after a backup', () async {
+    final store = await create();
+    final tag = await store.saveTag(name: 'Kept');
+    final root = store.root;
+    await store.close();
+    opened.remove(store);
+    final db = sqlite3.open(p.join(root, 'catalog.sqlite'));
+    db.execute('ALTER TABLE tags DROP COLUMN excluded_from_all');
+    db.execute('PRAGMA user_version = 2');
+    db.close();
+
+    final reopened = await LibraryStore.open(root);
+    opened.add(reopened);
+    expect((await reopened.tags()).single.id, tag);
+    await reopened.setTagExcludedFromAll(tag, true);
+    expect((await reopened.tags()).single.excludedFromAll, isTrue);
+    expect(
+      Directory(
+        p.join(root, 'backups'),
+      ).listSync().map((f) => p.basename(f.path)),
+      contains(startsWith('catalog-before-v3-')),
+    );
+  });
+
   test('imports .jfif files as JPEGs', () async {
     final store = await create();
     final image = img.Image(width: 30, height: 20);
