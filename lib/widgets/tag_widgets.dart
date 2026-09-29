@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../storage/library_store.dart';
 import '../storage/tag_repository.dart';
@@ -25,33 +26,66 @@ List<({LibraryTag tag, int depth})> tagTree(List<LibraryTag> tags) {
   return result;
 }
 
-/// Indents a tag row by its depth and draws tree guides from each ancestor,
-/// so nesting reads at a glance. [origin] is the x offset of the row's
-/// leading control (e.g. a checkbox) centre, which the guides line up with.
+/// For each row of a displayed tag tree (given as depths, parents first),
+/// which guide lines continue below it: entry k is true when the row's
+/// ancestor at depth k + 1, or for the last entry the row itself, has a later
+/// sibling. Rows at depth 0 get an empty list.
+List<List<bool>> tagTreeGuides(List<int> depths) {
+  bool hasNextSibling(int index) {
+    for (var j = index + 1; j < depths.length; j++) {
+      if (depths[j] < depths[index]) return false;
+      if (depths[j] == depths[index]) return true;
+    }
+    return false;
+  }
+
+  final continuing = <bool>[];
+  return [
+    for (var i = 0; i < depths.length; i++)
+      () {
+        final depth = depths[i];
+        // Keep ancestors' entries, replace this depth's with this row's.
+        if (continuing.length > depth)
+          continuing.removeRange(depth, continuing.length);
+        while (continuing.length < depth) {
+          continuing.add(false);
+        }
+        continuing.add(hasNextSibling(i));
+        return [for (var k = 1; k <= depth; k++) continuing[k]];
+      }(),
+  ];
+}
+
+/// Indents a tag row by its depth and draws tree guides from its ancestors,
+/// so nesting reads at a glance: ├ for a child with siblings below, └ for the
+/// last child, and ancestor lines only while that branch continues.
+/// [continues] comes from [tagTreeGuides]; its length is the row's depth.
+/// [origin] is the x offset of the row's leading control (e.g. a checkbox)
+/// centre, which the guides line up with.
 class TagTreeIndent extends StatelessWidget {
   const TagTreeIndent({
     super.key,
-    required this.depth,
+    required this.continues,
     required this.child,
     this.step = 24,
     this.origin = 28,
   });
-  final int depth;
+  final List<bool> continues;
   final Widget child;
   final double step, origin;
 
   @override
-  Widget build(BuildContext context) => depth == 0
+  Widget build(BuildContext context) => continues.isEmpty
       ? child
       : IntrinsicHeight(
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               SizedBox(
-                width: depth * step,
+                width: continues.length * step,
                 child: CustomPaint(
                   painter: _TagTreePainter(
-                    depth: depth,
+                    continues: continues,
                     step: step,
                     origin: origin,
                     color: Colors.white38,
@@ -66,12 +100,12 @@ class TagTreeIndent extends StatelessWidget {
 
 class _TagTreePainter extends CustomPainter {
   _TagTreePainter({
-    required this.depth,
+    required this.continues,
     required this.step,
     required this.origin,
     required this.color,
   });
-  final int depth;
+  final List<bool> continues;
   final double step, origin;
   final Color color;
 
@@ -80,15 +114,23 @@ class _TagTreePainter extends CustomPainter {
     final paint = Paint()
       ..color = color
       ..strokeWidth = 1;
-    // One vertical guide per ancestor level, continuous across sibling rows.
-    for (var level = 0; level < depth; level++) {
+    final depth = continues.length;
+    final y = size.height / 2;
+    // Ancestor levels: a full-height line only while that branch continues.
+    for (var level = 0; level < depth - 1; level++) {
+      if (!continues[level]) continue;
       final x = level * step + origin;
       canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
     }
-    // Elbow from the parent's guide to just before this row's control. The
-    // canvas is not clipped, so it may reach past the indent into the row.
+    // This row's own branch: down to the elbow, and on only if a sibling
+    // follows. The elbow runs to just before this row's control; the canvas
+    // is not clipped, so it may reach past the indent into the row.
     final parentX = (depth - 1) * step + origin;
-    final y = size.height / 2;
+    canvas.drawLine(
+      Offset(parentX, 0),
+      Offset(parentX, continues.last ? size.height : y),
+      paint,
+    );
     canvas.drawLine(
       Offset(parentX, y),
       Offset(depth * step + origin - 13, y),
@@ -98,7 +140,7 @@ class _TagTreePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_TagTreePainter old) =>
-      old.depth != depth ||
+      !listEquals(old.continues, continues) ||
       old.step != step ||
       old.origin != origin ||
       old.color != color;
@@ -556,6 +598,7 @@ class _BatchTagsDialogState extends State<BatchTagsDialog> {
     final rows = tagTree(widget.tags)
         .where((r) => r.tag.name.toLowerCase().contains(_search.toLowerCase()))
         .toList();
+    final guides = tagTreeGuides([for (final row in rows) row.depth]);
     final canSuggest =
         widget.onSuggest != null &&
         widget.thumbnail != null &&
@@ -581,7 +624,7 @@ class _BatchTagsDialogState extends State<BatchTagsDialog> {
                   itemBuilder: (context, index) {
                     final row = rows[index];
                     return TagTreeIndent(
-                      depth: row.depth,
+                      continues: guides[index],
                       child: CheckboxListTile(
                         key: ValueKey('assign-tag-${row.tag.id}'),
                         title: Text(
