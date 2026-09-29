@@ -2440,6 +2440,7 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                     child: DecoratedBox(
                       decoration: const BoxDecoration(color: AppColors.darker),
                       child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           Expanded(
                             child: SizedBox.expand(
@@ -2471,6 +2472,21 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                             PreviewDetails(
                               asset: _assetsByPath[_selectedPaths.first]!,
                               selectionCount: _selectedPaths.length,
+                            ),
+                            const Divider(
+                              height: 25,
+                              indent: 16,
+                              endIndent: 16,
+                              color: Colors.white12,
+                            ),
+                            SelectionTags(tags: _tags, assets: _selection),
+                            const Divider(
+                              height: 25,
+                              indent: 16,
+                              endIndent: 16,
+                              color: Colors.white12,
+                            ),
+                            OpenExternallyButton(
                               onOpen:
                                   _busy ||
                                       _assetsByPath[_selectedPaths.first]!
@@ -2478,7 +2494,6 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                                   ? null
                                   : _openPreviewExternally,
                             ),
-                            SelectionTags(tags: _tags, assets: _selection),
                           ],
                         ],
                       ),

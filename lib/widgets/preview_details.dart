@@ -2,16 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import '../storage/library_store.dart';
 
+/// Horizontal inset shared by every section of the preview panel.
+const previewInset = 16.0;
+
+/// Filename, then one line of dimensions and import date.
 class PreviewDetails extends StatelessWidget {
   const PreviewDetails({
     super.key,
     required this.asset,
     required this.selectionCount,
-    required this.onOpen,
   });
   final LibraryAsset asset;
   final int selectionCount;
-  final VoidCallback? onOpen;
 
   @override
   Widget build(BuildContext context) {
@@ -25,7 +27,7 @@ class PreviewDetails extends StatelessWidget {
         ? 'Unknown import date'
         : '${localizations.formatFullDate(added)} · ${localizations.formatTimeOfDay(TimeOfDay.fromDateTime(added))}';
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+      padding: const EdgeInsets.fromLTRB(previewInset, 12, previewInset, 0),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -52,17 +54,15 @@ class PreviewDetails extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(height: 6),
-          Text(
-            '${asset.width} × ${asset.height} px',
-            style: const TextStyle(color: Colors.white70, fontSize: 12),
-          ),
-          const SizedBox(height: 2),
+          const SizedBox(height: 4),
           Tooltip(
             message: fullDate,
             child: Text(
+              '${asset.width} × ${asset.height} px · '
               'Added ${added == null ? '—' : localizations.formatShortDate(added)}',
-              style: const TextStyle(color: Colors.white70, fontSize: 12),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white60, fontSize: 12),
             ),
           ),
           if (selectionCount > 1)
@@ -73,31 +73,28 @@ class PreviewDetails extends StatelessWidget {
                 style: const TextStyle(color: Colors.white54, fontSize: 11),
               ),
             ),
-          const SizedBox(height: 8),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 200),
-            child: OutlinedButton(
-              onPressed: onOpen,
-              style: OutlinedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-              ),
-              child: const Row(
-                children: [
-                  Icon(Icons.open_in_new, size: 16),
-                  SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      'Open in ext. viewer',
-                      maxLines: 2,
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
         ],
       ),
     );
   }
+}
+
+/// Full-width action at the bottom of the preview panel.
+class OpenExternallyButton extends StatelessWidget {
+  const OpenExternallyButton({super.key, required this.onOpen});
+  final VoidCallback? onOpen;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(previewInset, 0, previewInset, 16),
+    child: OutlinedButton.icon(
+      onPressed: onOpen,
+      icon: const Icon(Icons.open_in_new, size: 16),
+      label: const Text(
+        'Open in external viewer',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+    ),
+  );
 }

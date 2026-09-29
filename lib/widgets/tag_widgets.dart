@@ -766,28 +766,36 @@ class SelectionTags extends StatelessWidget {
     ].where((item) => item.count > 0).toList();
     return Container(
       constraints: const BoxConstraints(maxHeight: 190),
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Matches the sidebar's TAGS heading.
           const Padding(
             padding: EdgeInsets.only(bottom: 8),
-            child: Text('Tags'),
+            child: Text(
+              'TAGS',
+              style: TextStyle(fontSize: 12, color: Colors.white60),
+            ),
           ),
           Flexible(
             child: SingleChildScrollView(
               child: assigned.isEmpty
                   ? const Text(
                       'No tags assigned',
-                      style: TextStyle(color: Colors.white54),
+                      style: TextStyle(color: Colors.white54, fontSize: 13),
                     )
                   : Wrap(
                       spacing: 6,
-                      runSpacing: 4,
+                      runSpacing: 6,
                       children: [
                         for (final item in assigned)
                           Chip(
+                            visualDensity: VisualDensity.compact,
+                            materialTapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                            labelStyle: const TextStyle(fontSize: 12),
                             label: Text(
                               '${item.tag.name}${item.count < assets.length ? ' · ${item.count}/${assets.length}' : ''}',
                             ),
