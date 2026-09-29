@@ -151,8 +151,14 @@ class LibraryStore {
           )
           .toList();
 
-  Future<ImportResult> importImage(String sourcePath) async {
-    final result = await _call('import', sourcePath) as Map;
+  /// Copies an image into the library. [tagIds] are assigned to it, including
+  /// when it turns out to be a duplicate of an existing asset.
+  Future<ImportResult> importImage(
+    String sourcePath, {
+    List<String> tagIds = const [],
+  }) async {
+    final result =
+        await _call('import', {'path': sourcePath, 'tags': tagIds}) as Map;
     return ImportResult(
       LibraryAsset.fromMap(Map<String, Object?>.from(result['asset'] as Map)),
       result['duplicate'] as bool,
@@ -524,7 +530,11 @@ class _LibraryEngine {
         );
         return null;
       case 'import':
-        return _import(args as String);
+        final values = args as Map;
+        return _import(
+          values['path'] as String,
+          tagIds: (values['tags'] as List).cast<String>(),
+        );
       case 'capture':
         return _capture(args as Map);
       case 'thumbnail':

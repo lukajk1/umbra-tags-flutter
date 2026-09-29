@@ -36,6 +36,22 @@ void main() {
     ).writeAsBytes(img.encodePng(image));
   }
 
+  test('imports assign the given tags, including to duplicates', () async {
+    final store = await create();
+    final tag = await store.saveTag(name: 'Inbox');
+    final first = await picture('first.png');
+    final imported = await store.importImage(first.path, tagIds: [tag]);
+    final inTag = await store.assets(tagId: tag);
+    expect(inTag.single.id, imported.asset.id);
+    expect(inTag.single.tagIds, [tag]);
+
+    final other = await store.saveTag(name: 'Other');
+    final again = await store.importImage(first.path, tagIds: [other]);
+    expect(again.duplicate, isTrue);
+    final tagged = await store.assets(tagId: other);
+    expect(tagged.single.tagIds, containsAll([tag, other]));
+  });
+
   test(
     'imports immutable originals, skips exact duplicates and persists archive state',
     () async {

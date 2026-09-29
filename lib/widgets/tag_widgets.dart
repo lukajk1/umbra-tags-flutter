@@ -178,34 +178,45 @@ class _TagSidebarState extends State<TagSidebar> {
                                     _tagAction(action, row.tag);
                                   }
                                 },
-                          child: ListTile(
-                            key: ValueKey('tag-filter-${row.tag.id}'),
-                            dense: true,
-                            contentPadding: EdgeInsets.only(
-                              left:
-                                  12 + (row.depth * 12).clamp(0, 60).toDouble(),
-                            ),
-                            leading: const Icon(Icons.label_outline, size: 18),
-                            minLeadingWidth: 16,
-                            title: Tooltip(
-                              message: row.tag.name,
-                              child: Text(
-                                row.tag.name,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
+                          // Drag a tag onto gallery images to assign it.
+                          child: Draggable<LibraryTag>(
+                            data: row.tag,
+                            maxSimultaneousDrags: widget.busy ? 0 : 1,
+                            dragAnchorStrategy: pointerDragAnchorStrategy,
+                            feedback: _TagDragFeedback(name: row.tag.name),
+                            child: ListTile(
+                              key: ValueKey('tag-filter-${row.tag.id}'),
+                              dense: true,
+                              contentPadding: EdgeInsets.only(
+                                left:
+                                    12 +
+                                    (row.depth * 12).clamp(0, 60).toDouble(),
                               ),
-                            ),
-                            selected: widget.selectedTag == row.tag.id,
-                            onTap: widget.busy
-                                ? null
-                                : () => widget.onSelect(row.tag.id),
-                            trailing: PopupMenuButton<String>(
-                              tooltip: 'Manage ${row.tag.name}',
-                              enabled: !widget.busy,
-                              icon: const Icon(Icons.more_vert, size: 18),
-                              onSelected: (action) =>
-                                  _tagAction(action, row.tag),
-                              itemBuilder: (_) => _menuItems(),
+                              leading: const Icon(
+                                Icons.label_outline,
+                                size: 18,
+                              ),
+                              minLeadingWidth: 16,
+                              title: Tooltip(
+                                message: row.tag.name,
+                                child: Text(
+                                  row.tag.name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              selected: widget.selectedTag == row.tag.id,
+                              onTap: widget.busy
+                                  ? null
+                                  : () => widget.onSelect(row.tag.id),
+                              trailing: PopupMenuButton<String>(
+                                tooltip: 'Manage ${row.tag.name}',
+                                enabled: !widget.busy,
+                                icon: const Icon(Icons.more_vert, size: 18),
+                                onSelected: (action) =>
+                                    _tagAction(action, row.tag),
+                                itemBuilder: (_) => _menuItems(),
+                              ),
                             ),
                           ),
                         );
@@ -217,6 +228,35 @@ class _TagSidebarState extends State<TagSidebar> {
       ),
     );
   }
+}
+
+class _TagDragFeedback extends StatelessWidget {
+  const _TagDragFeedback({required this.name});
+  final String name;
+
+  @override
+  Widget build(BuildContext context) => Transform.translate(
+    offset: const Offset(12, 8),
+    child: Material(
+      color: const Color(0xFF262622),
+      elevation: 6,
+      borderRadius: BorderRadius.circular(14),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.label_outline, size: 16),
+            const SizedBox(width: 6),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 220),
+              child: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 class TagDetailsDialog extends StatefulWidget {

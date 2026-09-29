@@ -662,13 +662,21 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
           .toList(),
     ),
     capture: (capture) => _withWebLibrary(capture.libraryId, (store) async {
+      final current = identical(store, _library);
       final result = await store.importCapture(
         capture.bytes,
         filename: capture.filename,
-        tagIds: capture.tagIds,
+        // Like disk imports, captures into the open library join its tag view.
+        tagIds: {
+          ...capture.tagIds,
+          if (current && _tagFilter != null) _tagFilter!,
+        }.toList(),
         maxDimension: capture.maxDimension,
       );
-      if (identical(store, _library)) await _reload();
+      if (current) {
+        await _reload();
+        _showNewestImports();
+      }
       if (mounted) {
         setState(
           () => _status =
@@ -922,6 +930,41 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
     });
   }
 
+  /// A tag dropped on a selected image applies to the whole selection;
+  /// dropped on any other image, to just that one.
+  void _applyDroppedTag(String path, LibraryTag tag) => _run(() async {
+    final paths = _selectedPaths.contains(path) ? _selectedPaths : {path};
+    final ids = [
+      for (final target in paths)
+        if (_assetsByPath[target] case final asset?) asset.id,
+    ];
+    if (ids.isEmpty) return;
+    await _library!.editTags(ids, add: [tag.id], remove: const []);
+    await _reload();
+    if (mounted) {
+      setState(
+        () => _status =
+            'Tagged ${ids.length} ${ids.length == 1 ? 'image' : 'images'} '
+            '“${tag.name}”',
+      );
+    }
+  });
+
+  /// Scrolls to the top, where the newest imports are listed, optionally
+  /// selecting them.
+  void _showNewestImports({Set<String>? select}) {
+    if (!mounted) return;
+    if (select != null && select.isNotEmpty) {
+      setState(
+        () => _selectedPaths
+          ..clear()
+          ..addAll(select),
+      );
+    }
+    _pendingScrollOffset = null;
+    if (_scrollController.hasClients) _scrollController.jumpTo(0);
+  }
+
   Future<String?> _thumbnailFor(String path) {
     if (_thumbnails.length > 256) _thumbnails.remove(_thumbnails.keys.first);
     return _thumbnails.putIfAbsent(
@@ -1064,9 +1107,15 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
 
   // Once imported (or found already in the library), source files move to the
   // Recycle Bin. Files inside the library folder are never touched.
+  //
+  // Imports land in the gallery that is open: a tag view assigns its tag so
+  // they appear there, and the archive view switches to all images. The
+  // gallery then scrolls to the top with the imported images selected.
   Future<void> _importImageFiles(List<XFile> files) async {
     final library = _library;
     if (library == null || files.isEmpty) return;
+    final tagIds = [?_tagFilter];
+    final imported = <String>{};
     var added = 0;
     var duplicates = 0;
     final errors = <String>[];
@@ -1077,7 +1126,8 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
         setState(() => _status = 'Importing ${i + 1} of ${files.length}…');
       }
       try {
-        final result = await library.importImage(files[i].path);
+        final result = await library.importImage(files[i].path, tagIds: tagIds);
+        imported.add(library.absolutePath(result.asset.relativePath));
         final source = p.absolute(files[i].path);
         if (!p.isWithin(library.root, source) &&
             !p.equals(library.root, source)) {
@@ -1107,7 +1157,13 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
       }
     }
     _thumbnails.clear();
+    if (imported.isNotEmpty && _showArchived) _showArchived = false;
     await _reload();
+    if (imported.isNotEmpty) {
+      _showNewestImports(
+        select: imported.where(_assetsByPath.containsKey).toSet(),
+      );
+    }
     if (mounted) {
       setState(
         () => _status =
@@ -2086,6 +2142,16 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                               onSimilar: _busy
                                   ? null
                                   : () => _findSimilar(_assets[index]),
+                              onTagDropped: _busy
+                                  ? null
+                                  : (tag) => _applyDroppedTag(
+                                      _imagePaths[index],
+                                      tag,
+                                    ),
+                              tagDropCount:
+                                  _selectedPaths.contains(_imagePaths[index])
+                                  ? _selectedPaths.length
+                                  : 1,
                             ),
                           );
                         } else {
@@ -2134,6 +2200,16 @@ class _GalleryPageState extends State<GalleryPage> with WindowListener {
                               onSimilar: _busy
                                   ? null
                                   : () => _findSimilar(_assets[index]),
+                              onTagDropped: _busy
+                                  ? null
+                                  : (tag) => _applyDroppedTag(
+                                      _imagePaths[index],
+                                      tag,
+                                    ),
+                              tagDropCount:
+                                  _selectedPaths.contains(_imagePaths[index])
+                                  ? _selectedPaths.length
+                                  : 1,
                             ),
                           );
                         }
@@ -2333,6 +2409,8 @@ class GalleryTile extends StatelessWidget {
     this.onRefine,
     this.canRefine,
     this.onSimilar,
+    this.onTagDropped,
+    this.tagDropCount = 1,
   });
 
   final String path;
@@ -2353,6 +2431,10 @@ class GalleryTile extends StatelessWidget {
       onRefine,
       onClassify,
       onSimilar;
+
+  /// Assigns a tag dragged from the sidebar; [tagDropCount] images receive it.
+  final ValueChanged<LibraryTag>? onTagDropped;
+  final int tagDropCount;
 
   @override
   Widget build(BuildContext context) {
@@ -2396,25 +2478,51 @@ class GalleryTile extends StatelessWidget {
         );
       },
     );
-    return GestureDetector(
-      onTap: onTap,
-      onDoubleTap: onDoubleTap,
-      onSecondaryTapUp: (d) => _showContextMenu(context, d.globalPosition),
-      child: Stack(
-        fit: layout == LayoutMode.masonry ? StackFit.loose : StackFit.expand,
-        children: [
-          layout == LayoutMode.masonry
-              ? AspectRatio(aspectRatio: aspectRatio, child: image)
-              : ColoredBox(color: AppColors.lighter, child: image),
-          if (selected)
-            Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  border: Border.all(color: AppColors.accent, width: 2),
+    return DragTarget<LibraryTag>(
+      onWillAcceptWithDetails: (_) => onTagDropped != null,
+      onAcceptWithDetails: (details) => onTagDropped?.call(details.data),
+      builder: (context, candidates, _) => GestureDetector(
+        onTap: onTap,
+        onDoubleTap: onDoubleTap,
+        onSecondaryTapUp: (d) => _showContextMenu(context, d.globalPosition),
+        child: Stack(
+          fit: layout == LayoutMode.masonry ? StackFit.loose : StackFit.expand,
+          children: [
+            layout == LayoutMode.masonry
+                ? AspectRatio(aspectRatio: aspectRatio, child: image)
+                : ColoredBox(color: AppColors.lighter, child: image),
+            if (selected || candidates.isNotEmpty)
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: candidates.isNotEmpty ? Colors.black45 : null,
+                    border: Border.all(
+                      color: AppColors.accent,
+                      width: candidates.isNotEmpty ? 3 : 2,
+                    ),
+                  ),
                 ),
               ),
-            ),
-        ],
+            if (candidates.isNotEmpty)
+              Positioned.fill(
+                child: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Text(
+                      tagDropCount > 1
+                          ? 'Add to $tagDropCount images'
+                          : 'Add tag',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        shadows: [Shadow(blurRadius: 4, color: Colors.black)],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
